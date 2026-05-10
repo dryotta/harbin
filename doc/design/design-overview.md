@@ -4,7 +4,7 @@
 >
 > Status: **north-star design** · scope: full product vision at high level · audience: contributors
 
-This is a **north-star** design document — every subsystem is described at the level needed to agree on shape, vocabulary, and interfaces. Implementation depth (concrete schemas, CLIs, error taxonomies) lives in per-subsystem sub-specs that this doc will link to as they are written.
+This is a **north-star** design document — every subsystem is described at the level needed to agree on shape, vocabulary, and interfaces. Implementation depth (concrete schemas, CLIs, error taxonomies) lives in per-subsystem **sub-specs**; see §11 for the full map.
 
 ---
 
@@ -223,7 +223,7 @@ This is the most pluggable subsystem.
   HARBIN_JOB_ID=<short-hex>
   HARBIN_PROMPT=<the prompt text>
   ```
-- **Invocation contract:** the agent CLI is run as `<agent_cli.command> [extra_args…]`. The prompt is conveyed by **stdin** by default. Alternative modes (flag, tempfile) are configurable for CLIs that don't read stdin. The exact flag shape for the default CLI is pinned in a **sub-spec** (`doc/design/agent-cli-invocation.md`, to be written) — not in this doc, so we don't bake in a single tool.
+- **Invocation contract:** the agent CLI is run as `<agent_cli.command> [extra_args…]`. The prompt is conveyed by **stdin** by default. Alternative modes (flag, tempfile) are configurable for CLIs that don't read stdin. The exact flag shape for the default CLI is pinned in a **sub-spec** (`doc/design/11-agent-cli-invocation.md`, to be written) — not in this doc, so we don't bake in a single tool.
 - **Stdio capture:** stdout/stderr piped to (a) an in-memory ring buffer (last 4 MiB per job, surfaces in the job's alt+N pane and `/logs <job>`) and (b) `<artifact_dir>/job.log` on disk.
 - **Cancellation:** `/cancel <job>` → SIGTERM → 10 s grace → SIGKILL. Pre-run worktree state recorded; on cancel, optional `git stash` to preserve user investigation.
 - **Pluggability:** global `agent_cli` in `config.yaml`; per-fleet override in `fleet.yaml`. Same shape both places.
@@ -437,3 +437,37 @@ These are explicitly **not** in v1. Each is a candidate for a later phase, but m
 - **Conversation continuity.** Each job is one-shot — there is no resume-this-conversation primitive.
 - **Multi-user / hosted harbin.** Harbin is single-tenant by design.
 - **In-app `devtunnel` install.** The user installs `devtunnel` themselves; harbin only wraps the running binary.
+
+---
+
+## 11 · Sub-specs
+
+The sub-specs below complement this north-star document. Each owns a single subsystem or cross-cutting concern, pinned at medium depth: shapes and key decisions concrete, smaller details left to convention. They share a folder with this overview (`doc/design/`) and cross-reference one another by filename.
+
+**Foundations** — engineering substrate referenced by every other doc.
+
+ 1. [`01-project-layout`](./01-project-layout.md) — source tree, `pyproject.toml`, entry points, `platformdirs` paths, dev workflow.
+ 2. [`02-state-store`](./02-state-store.md) — SQLite schema, migration framework, log-chunk ring, hot-path queries.
+ 3. [`03-configuration`](./03-configuration.md) — pydantic schemas for `config.yaml` / `fleet.yaml` / `schedule.yaml`, validation, hot reload.
+ 4. [`04-concurrency-and-errors`](./04-concurrency-and-errors.md) — event loop, lifecycle, signals, error taxonomy, app logging.
+ 5. [`05-testing-strategy`](./05-testing-strategy.md) — pytest layout, fake agent CLI, snapshot tests, CI lanes.
+ 6. [`06-packaging-and-install`](./06-packaging-and-install.md) — `uv tool install harbin`, platforms, first-run UX, `sample-fleet add`.
+
+**Fleet plane** — fleets, docks, artifacts (overview §4).
+
+ 7. [`07-fleet-and-dock-manager`](./07-fleet-and-dock-manager.md) — dock filesystem layout, git sync, watchdog hot reload, push-back.
+ 8. [`08-artifact-manager`](./08-artifact-manager.md) — artifact directory layout, `HARBIN_ARTIFACT_DIR`, retention sweep, browser.
+
+**Execution plane** — scheduler, runner, agent-CLI contract (overview §5).
+
+ 9. [`09-scheduler`](./09-scheduler.md) — tick loop, croniter, missed-fire skip, DST handling, schedule hot-reload diff.
+10. [`10-agent-runner`](./10-agent-runner.md) — job state machine, subprocess spawn, stdio pipeline, cancellation, concurrency gating.
+11. [`11-agent-cli-invocation`](./11-agent-cli-invocation.md) — invocation modes (stdin / flag / tempfile), defaults, per-fleet override.
+
+**Interaction plane** — TUI, REPL, web/tunnels (overview §6).
+
+12. [`12-tui-architecture`](./12-tui-architecture.md) — Textual app shell, screens, widgets, theme, key bindings, `/config` modal.
+13. [`13-repl-and-commands`](./13-repl-and-commands.md) — `/` and `@` grammar, tab completion, per-command spec.
+14. [`14-web-ui-and-tunnels`](./14-web-ui-and-tunnels.md) — `harbin serve` (textual-serve), `/tunnel` (devtunnel wrapper).
+
+**Reading order.** A contributor new to harbin reads sequentially. A contributor touching one subsystem reads the relevant sub-spec plus its foundations dependencies (every sub-spec calls these out at the top).
