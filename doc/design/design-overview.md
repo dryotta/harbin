@@ -2,20 +2,9 @@
 
 > *A minimalist command center for GitHub Copilot AI agents.*
 >
-> Status: **north-star design** · scope: full product vision at high level · audience: contributors
+> Scope: full product vision, sized for an AI coding agent to implement in one shot.
 
-This is a **north-star** design document — every subsystem is described at the level needed to agree on shape, vocabulary, and interfaces. Implementation depth (concrete schemas, CLIs, error taxonomies) lives in per-subsystem **sub-specs**; see §11 for the full map.
-
----
-
-## Engineering meta-principles
-
-These bind every PR. They are non-negotiable and appear here, in commit-message templates, in the contributor guide, and in CI lint rules where mechanizable.
-
-1. **Never increase debt.** Each change leaves the codebase in equal or better shape than it found it. Refactors that pay down debt are welcome when scoped to the area being touched; unrelated refactors are not.
-2. **Proper fix over patch.** Root-cause over workaround. If a patch ships (e.g. blocking a release), it is labeled `tech-debt` and tracked to a follow-up issue before the patch lands.
-3. **Zero regression.** Every bug ships with a test that would have caught it. No exceptions, including "trivial" fixes.
-4. **Docs reflect shipped code.** The design doc, sub-specs, and READMEs are part of the change, not an afterthought. A PR that changes shipped behavior without updating the docs is incomplete.
+This is the single design document. Every subsystem is described at the level needed to agree on shape, vocabulary, and interfaces. Where a detail is **non-obvious or load-bearing**, it is pinned inline here; everything else is left to the implementation. There are no sub-specs.
 
 ---
 
@@ -23,7 +12,7 @@ These bind every PR. They are non-negotiable and appear here, in commit-message 
 
 Harbin is a single Python process that lets a developer run, schedule, and observe a small fleet of GitHub-Copilot-style coding agents working in repos they control.
 
-Conceptually: harbin is a **harbor**. Each repo it manages is a **fleet** moored in its own **dock**. Harbin watches the docks, fires off agent runs (a **job**) on a schedule or on demand, captures their output as **artifacts**, and surfaces the whole thing through one terminal UI (and the same UI served over the web).
+Conceptually: harbin is a **harbor**. Each repo it manages is a **fleet** moored in its own **dock**. Harbin watches the docks, pulls them up to date, fires off agent runs (a **job**) on a schedule or on demand, captures their output as **artifacts**, and surfaces the whole thing through one terminal UI.
 
 The product is intentionally small. It does **one** thing — run repos that are set up to host coding agents — and exposes them as a unified workspace. Anything that does not serve that goal is out of scope.
 
@@ -39,9 +28,8 @@ The product is intentionally small. It does **one** thing — run repos that are
 | **Job** | One execution of `(fleet, prompt)`. Has a status, stdio capture, an artifact directory, and a source. |
 | **Source** | Where a job originated: `repl` (typed `@fleet PROMPT`) or `schedule` (cron task fired). |
 | **Task** | A recurring saved prompt: `(id, cron, prompt)` declared in `schedule.yaml`. When a task fires it enqueues a job with `source=schedule`. |
-| **Artifact** | Files a job produces under `~/.local/share/harbin/artifacts/<fleet>/<task-id-or-adhoc>/<job-id>/`. |
-| **REPL** | The command-line input buffer at the bottom of the TUI. Accepts slash commands (`/help`) and at-mentions (`@fleet PROMPT`). |
-| **Tunnel** | A Microsoft Dev Tunnel created by `devtunnel host`. Harbin offers a lifecycle wrapper but does not embed the tunnel implementation. |
+| **Artifact** | Files a job produces under `~/.local/share/harbin/artifacts/<fleet>/<task-id-or-adhoc>/<job-id>/`, including `job.log`. |
+| **CommandLine** | The single-line input at the bottom of the TUI. Accepts ad-hoc prompts as `@fleet PROMPT`. |
 
 ---
 
@@ -52,31 +40,29 @@ A **single foreground Python process**. No daemon, no IPC, no separate services.
 ```
 ┌─────────────────────  one  harbin  process  ──────────────────────┐
 │                                                                    │
-│  ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────────┐    │
-│  │   TUI    │   │   REPL   │   │ Web UI   │   │ Dev Tunnels  │    │
-│  │ (Textual)│   │ (slash + │   │ (textual-│   │ (external,   │    │
-│  │          │   │  @ men.) │   │  serve)  │   │  optional)   │    │
-│  └────┬─────┘   └────┬─────┘   └────┬─────┘   └──────┬───────┘    │
-│       │              │              │                 │            │
-│       └──────────────┴──────┬───────┘                 │            │
-│                             ▼                         │            │
-│                    ┌──────────────┐                   │            │
-│                    │   AppCore    │◄──────────────────┘            │
-│                    │  (asyncio    │                                │
-│                    │   event bus) │                                │
-│                    └──┬───────┬───┘                                │
-│             ┌─────────┘       └─────────┐                          │
-│             ▼                           ▼                          │
-│   ┌──────────────────┐          ┌──────────────────┐               │
-│   │   Dock Manager   │          │    Scheduler     │               │
-│   │  (git: clone,    │          │  (cron parser,   │               │
-│   │   pull, push,    │          │   in-process,    │               │
-│   │   worktrees)     │          │   persisted)     │               │
-│   └────────┬─────────┘          └────────┬─────────┘               │
-│            ▼                             ▼                          │
+│              ┌──────────┐         ┌────────────┐                   │
+│              │   TUI    │         │ CommandLine│                   │
+│              │ (Textual)│         │  (@fleet)  │                   │
+│              └────┬─────┘         └─────┬──────┘                   │
+│                   └───────────┬─────────┘                          │
+│                               ▼                                    │
+│                      ┌──────────────┐                              │
+│                      │   AppCore    │                              │
+│                      │  (asyncio    │                              │
+│                      │   event bus) │                              │
+│                      └──┬───────┬───┘                              │
+│             ┌───────────┘       └───────────┐                      │
+│             ▼                               ▼                      │
+│   ┌──────────────────┐            ┌──────────────────┐             │
+│   │   Dock Manager   │            │    Scheduler     │             │
+│   │  (clone, pull,   │            │  (cron parser,   │             │
+│   │   stash;         │            │   in-process,    │             │
+│   │   never pushes)  │            │   persisted)     │             │
+│   └────────┬─────────┘            └────────┬─────────┘             │
+│            ▼                               ▼                       │
 │   ┌────────────────────────────────────────────┐                   │
 │   │              Agent Runner                  │                   │
-│   │  spawns <agent_cli> --prompt … --cwd <dock>│                   │
+│   │  spawns <agent_cli> with prompt on stdin   │                   │
 │   │  captures stdio, manages job lifecycle     │                   │
 │   └─────────────────┬──────────────────────────┘                   │
 │                     ▼                                              │
@@ -93,9 +79,8 @@ A **single foreground Python process**. No daemon, no IPC, no separate services.
 |---|---|---|
 | Language / runtime | **Python 3.14** | Modern Python; required for parts of the textual ecosystem. |
 | TUI framework | **Textual** | Mature widget set; same toolkit toad uses. Direct ASCII-mockup translation. |
-| Web UI | **textual-serve** | Same Textual app served over WebSocket. No second frontend to maintain. |
 | Async runtime | **asyncio** (single loop) | Lets git ops, scheduler, agent subprocesses, and UI coexist without threads. |
-| State store | **SQLite via `aiosqlite`** | Single file, zero ops, async-friendly. |
+| State store | **SQLite via `aiosqlite`** | Indexed queries (jobs/logs/schedule), single file, async-friendly, zero ops. |
 | HTTP / fetching | **httpx** | Async, used by skills that need to fetch. |
 | Config validation | **pydantic** | Schema for `config.yaml`, `fleet.yaml`, `schedule.yaml`. |
 | Filesystem watching | **watchdog** | Hot-reload of `fleet.yaml` / `schedule.yaml`. |
@@ -114,10 +99,19 @@ Foreground only. No daemon, no system service. The expected usage pattern is: le
 | `~/.config/harbin/config.yaml` | User preferences (pydantic-validated). |
 | `~/.local/share/harbin/harbin.db` | SQLite — fleets, jobs, schedule state, log chunks. |
 | `~/.local/share/harbin/docks/<fleet>/` | Cloned fleet repos (working trees). |
-| `~/.local/share/harbin/artifacts/<fleet>/<task-id-or-adhoc>/<job-id>/` | Per-job artifact directories. |
+| `~/.local/share/harbin/artifacts/<fleet>/<task-id-or-adhoc>/<job-id>/` | Per-job artifact directories (including `job.log`). |
 | `~/.cache/harbin/` | Ephemeral / discardable. |
 
-Exact paths resolved via `platformdirs` so macOS and Windows get their native equivalents.
+Exact paths resolved via `platformdirs` so macOS and Windows get their native equivalents. Every config/state file harbin writes goes through a `tmp + replace` atomic helper. SQLite handles its own atomicity (WAL); job log files are append-only.
+
+### 3.4 Concurrency & shutdown
+
+- **One asyncio loop**, owned by `AppCore`; Textual's `App.run_async` shares it. No threads except those inside dependencies (aiosqlite worker, watchdog observer) — these are encapsulated behind awaitable APIs. Watchdog callbacks marshal to the loop via `loop.call_soon_threadsafe`.
+- **Structured concurrency.** Long-running work runs under an `asyncio.TaskGroup`. Bare `create_task` is reserved for fire-and-forget work bounded by a single user action.
+- **Task naming convention:** `task.set_name(f"{subsystem}.{role}[:{detail}]")` — e.g. `scheduler.tick`, `dock.sync:news`, `runner.job:a1b2c3`. Shows up in tracebacks.
+- **Shutdown:** mark draining → cancel scheduler/sync tasks → SIGTERM each running job (10 s grace, then SIGKILL) → flush logs → close DB → exit (0 normal, 130 SIGINT, 143 SIGTERM).
+- **Hung-shutdown watchdog:** the whole shutdown is wrapped in a 30 s `asyncio.wait_for`; if it trips, harbin logs and calls `os._exit(2)`. This is the only place harbin uses `_exit`.
+- **Windows signal caveat:** `SIGTERM` is not deliverable to console apps; users quit via the quit shortcut, Ctrl-C (caught by `signal.signal`), or by closing the terminal (equivalent to SIGKILL).
 
 ---
 
@@ -147,13 +141,14 @@ name: harbin-agent-sample-news      # human-readable; must be unique in this ins
 default_branch: main
 
 # Optional: override the global agent CLI for this fleet.
+# v1 invocation contract is stdin-only: harbin writes the prompt text (UTF-8)
+# to the subprocess's stdin and closes it. The command is launched as-is — no
+# argv substitution, no shell.
 agent_cli:
-  command: ["copilot"]              # any binary; passed an env var with the prompt
-  # See §5.2 for the full invocation contract.
+  command: ["copilot"]              # argv prefix; required
 
 artifact_policy:
   retain: 30d                       # how long to keep artifacts on disk
-  push_back: false                  # if true, commit artifact dir contents back to repo
 ```
 
 #### `schedule.yaml`
@@ -171,31 +166,27 @@ tasks:
     prompt: "Check current prices for the watchlist. Save to prices.json."
 ```
 
-A task is **a saved prompt plus a cron expression**, nothing more. When it fires, the scheduler enqueues a job equivalent to typing `@fleet <prompt>` in the REPL. This is the **one-way-to-do-things** principle: ad-hoc and scheduled invocations share a single code path.
+A task is **a saved prompt plus a cron expression**, nothing more. When it fires, the scheduler enqueues a job equivalent to typing `@fleet <prompt>` in the CommandLine. This is the **one-way-to-do-things** principle: ad-hoc and scheduled invocations share a single code path.
 
 ### 4.2 Dock Manager
 
-- **One dock per fleet.** Path: `~/.local/share/harbin/docks/<fleet-name>/`. A regular `git clone`.
-- **Sync policy:** background `git fetch` every N minutes (default 5m, configurable). If the working tree is clean, fast-forward `<default_branch>`. If dirty, surface a warning on the fleet's monitor row and skip ff — never overwrite local state.
-- **Push:** after a successful job that mutated the worktree *and* `fleet.yaml.artifact_policy.push_back: true`, harbin commits the artifact dir contents with a structured message:
-  ```
-  harbin: <task-id-or-"adhoc"> @<utc-iso>
+Harbin's job is to keep each dock as a **clean, up-to-date working tree**. Harbin is read-only with respect to the remote — it **never pushes**. An agent that wants to publish changes does so within the job (e.g. `git push` as one of the steps in its own prompt); harbin treats that as opaque agent behavior.
 
-  job: <job-id>
-  prompt: <first 80 chars>…
-  ```
-  and pushes to `<default_branch>`. Push failures are surfaced as a warning row; the artifacts remain on disk.
-- **Auth:** harbin uses the system `git` binary. Authentication is handled by the user's credential helper of choice (`gh auth`, SSH agent, Git Credential Manager). Harbin never stores tokens.
-- **Hot reload:** `watchdog` observes each dock's `.harbin/fleet.yaml` and `.harbin/schedule.yaml`. Edits trigger an in-place reload within ~1 s; running jobs are unaffected.
+- **One dock per fleet.** Path: `~/.local/share/harbin/docks/<fleet-name>/`. A plain `git clone --depth=50` (deepen on demand via `git fetch --unshallow`). Always a checked-out working tree of `default_branch` — never bare, never detached.
+- **System `git` only.** No `pygit2` / `dulwich`. Auth delegates to the user's credential helper (`gh auth`, SSH agent, Git Credential Manager, `osxkeychain`). Harbin never stores tokens.
+- **Pre-job pull.** Before spawning a job's agent subprocess, harbin runs `git fetch --prune origin` and then `git merge --ff-only origin/<default_branch>` if the worktree is clean. If the worktree is dirty before a job (rare — only happens if the previous post-job stash failed), the dock is marked dirty and the job is **skipped** with a warning row; no destructive operation runs.
+- **Background sync.** A per-fleet coroutine `dock.sync:<fleet>` at `sync_interval` (default 5m) runs the same `fetch + ff` so docks stay fresh even when no jobs are firing. Sync never resets / rebases / force-updates.
+- **Post-job cleanup.** After every job (success, failure, or cancel), harbin runs `git status --porcelain`; if anything is uncommitted/untracked, it runs `git stash push -u -m "harbin <job-id> @<utc-iso>"`. The worktree returns to a clean state for the next job. Stash entries accumulate as the operator's audit trail; harbin never drops them automatically.
+- **Hot reload.** `watchdog` observes each dock's `.harbin/fleet.yaml` and `.harbin/schedule.yaml`. Edits are debounced and applied within a few seconds — performance is not a tight constraint here. Running jobs are unaffected (they capture their config at spawn time). A per-fleet validation failure disables **that fleet only**; other fleets keep running until the user fixes the file.
 
 ### 4.3 Artifact Manager
 
-- **Root:** `~/.local/share/harbin/artifacts/`
-- **Layout:** `<fleet>/<task-id|adhoc>/<job-id>/`. Each job gets a freshly created, empty dir.
-- **Env var:** the agent runner sets `HARBIN_ARTIFACT_DIR` so agents can write idiomatically (`open("$HARBIN_ARTIFACT_DIR/brief.md", "w")` works after env-var expansion).
-- **Scope:** agents are *allowed* to write outside the artifact dir (e.g. `/tmp`, user-specified paths). Harbin only tracks what lands inside the artifact dir — outside writes are the agent's business.
-- **Retention:** default 30 days per fleet, overridable in `fleet.yaml`. A daily background sweep removes expired dirs and prunes the corresponding `job_log_chunks` rows.
-- **Browser:** `/artifacts <fleet>` opens a Textual file-tree panel. Clicking a file in a job's pane jumps to the file in the artifact browser.
+- **Root:** `~/.local/share/harbin/artifacts/` (overridable via `config.artifacts.root`; absolute path required).
+- **Layout:** `<fleet>/<task-id|adhoc>/<job-id>/`. This is **the** authoritative log and artifact tree — see §5.4. The dir is created empty **before** the agent subprocess spawns (so `HARBIN_ARTIFACT_DIR` exists by the time the agent runs) and uses `mkdir(parents=True, exist_ok=False)`; a collision indicates a `short_id` collision (a bug).
+- **Env var:** the agent runner sets `HARBIN_ARTIFACT_DIR` so agents can write idiomatically (`Path(os.environ["HARBIN_ARTIFACT_DIR"]) / "brief.md"`).
+- **Scope:** agents may also write outside the artifact dir (e.g. `/tmp`, user-specified paths, or inside the dock — those land in the post-job stash). Harbin only tracks what lands inside the artifact dir.
+- **Retention:** default 30 days per fleet, overridable in `fleet.yaml`. A daily sweep `rmtree`s expired job dirs and deletes their `job_log_chunks` rows; the `jobs` row stays (status flips to `archived`) so history remains visible. Active jobs are never swept; per-job failures are logged and don't abort the sweep.
+- **Browser:** see §6.1 — the artifact tree is a first-class navigation surface in the TUI.
 
 ---
 
@@ -203,46 +194,69 @@ A task is **a saved prompt plus a cron expression**, nothing more. When it fires
 
 ### 5.1 Scheduler
 
-- **In-process asyncio loop.** A single `Scheduler` coroutine wakes every 5 s (configurable) and asks each loaded task "are you due since last fire?"
-- **Cron parsing:** `croniter` in local time. Timezone is read from `config.yaml` (default: system local).
-- **Missed-fire policy:** silent skip. If harbin was off when a cron should have fired, the firing is dropped. v2 candidate: opt-in `catchup: latest` per task.
-- **Hot reload:** schedule changes from `watchdog` are picked up within ~1 s. In-flight jobs are unaffected; future fires reflect the new schedule.
-- **Persistence:** `schedule_state(task_pk, last_fire_ts)` so a rapid restart does not double-fire.
+- **In-process asyncio loop.** A single `Scheduler` coroutine wakes every `tick_seconds` (default 5 s, range 1..60) and asks each loaded task "are you due since last fire?"
+- **Cron parsing:** `croniter` in `config.timezone` (default: system local). DB timestamps stored as UTC ISO-8601.
+- **Missed-fire policy:** silent skip. If harbin was off when a cron should have fired, the firing is dropped. On startup, missing `last_fire_ts` rows are set to `now` (next fire = next due window after startup).
+- **DST behavior.** Spring-forward fires at the impossible local time are **skipped** (croniter returns the next valid occurrence). Fall-back duplicated hours **fire once** (`last_fire_ts` gates the second). Clock jumps are trusted — the scheduler does not detect them.
+- **Crash-vs-off semantics.** `schedule_state.last_fire_ts` is written **after** `enqueue_job` returns the inserted `jobs` row. A crash between "decide to fire" and "upsert" causes one re-fire on the next tick — by design, harbin prefers over-fire to under-fire on transient crashes (the off-case is what skip-missed handles).
+- **Hot reload.** Schedule diffs from watchdog reconcile per `task_id`: add (insert), remove (delete cascade), unchanged `source_sha = sha256(cron || \0 || prompt)` → no-op, cron change → re-anchor `last_fire_ts = now`, prompt-only change → preserve cadence.
 
 ### 5.2 Agent Runner
 
-This is the most pluggable subsystem.
+The most pluggable subsystem.
 
-- **Concurrency:** one job per dock at a time by default — prevents two agents trampling the same worktree. A global cap also applies (default 4). Per-task `concurrency: parallel` is an opt-in escape hatch.
+- **Concurrency.** Per-dock cap default 1 (serial); a per-task `concurrency: parallel` opts out for read-only prompts. Global cap default 4. Per-dock-serial protects the shared mutable worktree from concurrent agents.
 - **Job lifecycle:** `queued → starting → running → (success | failed | cancelled) → archived`.
-- **Spawning:** `asyncio.create_subprocess_exec`. Working directory is the dock. Environment is enriched with:
+- **Spawning:** `asyncio.create_subprocess_exec` (no shell). `cwd=<dock>`, `start_new_session=True` on POSIX / `CREATE_NEW_PROCESS_GROUP` on Windows — isolates the subprocess from harbin's session and lets cancellation signal the whole process group. Environment inherits the operator's full `os.environ` (so agent secrets like `GH_TOKEN`, `OPENAI_API_KEY` flow through) and is enriched with:
   ```
-  HARBIN_ARTIFACT_DIR=<path>
+  HARBIN_ARTIFACT_DIR=<path>      # absolute path to the per-job dir
   HARBIN_FLEET=<name>
   HARBIN_TASK_ID=<id-or-"adhoc">
   HARBIN_JOB_ID=<short-hex>
   HARBIN_PROMPT=<the prompt text>
   ```
-- **Invocation contract:** the agent CLI is run as `<agent_cli.command> [extra_args…]`. The prompt is conveyed by **stdin** by default. Alternative modes (flag, tempfile) are configurable for CLIs that don't read stdin. The exact flag shape for the default CLI is pinned in a **sub-spec** (`doc/design/11-agent-cli-invocation.md`, to be written) — not in this doc, so we don't bake in a single tool.
-- **Stdio capture:** stdout/stderr piped to (a) an in-memory ring buffer (last 4 MiB per job, surfaces in the job's alt+N pane and `/logs <job>`) and (b) `<artifact_dir>/job.log` on disk.
-- **Cancellation:** `/cancel <job>` → SIGTERM → 10 s grace → SIGKILL. Pre-run worktree state recorded; on cancel, optional `git stash` to preserve user investigation.
-- **Pluggability:** global `agent_cli` in `config.yaml`; per-fleet override in `fleet.yaml`. Same shape both places.
+- **Invocation contract (stdin-only).** The agent CLI is run as `agent_cli.command` verbatim — no argv substitution, no shell. The prompt text (UTF-8) is written to the subprocess's stdin and the pipe is closed. No `flag` / `tempfile` modes in v1 — every supported agent CLI is expected to read its prompt from stdin (or to read its prompt out of `HARBIN_PROMPT` if it prefers).
+- **Captured-at-spawn config.** When a job moves `queued → starting`, the runner snapshots `agent_cli`, `kill_grace_seconds`, and concurrency flags. Mid-run config edits do **not** affect running jobs.
+- **Stdio capture.** Each stream is read line-by-line into (a) an in-memory ring buffer (4 MiB per job — backs the JobView when first opened) and (b) `<artifact_dir>/job.log` (append-only, the **authoritative** on-disk log) and (c) `job_log_chunks` in SQLite (the DB tail surface, capped to 4 MiB with oldest-first eviction inside the insert transaction; a `system` chunk records the truncation). `stdout` / `stderr` are tagged separately; `system` is reserved for runner-synthesized lines (`START`, `EXIT code=N`, `SIGNAL <name>`, truncation marker).
+- **Agent stdio never enters the app logger** — a chatty agent must not be able to roll harbin's log.
+- **Cancellation.** Cancel flips intent; the runner SIGTERMs the process group → waits `kill_grace_seconds` (default 10) → SIGKILLs the group. Queued jobs cancel immediately without a subprocess. Any worktree changes the agent left behind are captured by the standard post-job stash (§4.2) — no special cancel-time logic, the same cleanup runs for every terminal state.
+- **No per-job wall-clock timeout in v1.** Operators who need a cap wrap their prompt with `timeout(1)` or equivalent.
+- **Exit-code contract.** 0 → `success`; non-zero → `failed`; killed by cancellation → `cancelled` (`exit_code` typically `-15` / `-9` on POSIX). Harbin does not interpret richer exit-code conventions; agents that want them emit a `status.json` artifact.
 
 ### 5.3 State store
 
-Single SQLite file (`harbin.db`) via `aiosqlite`. Tables (high level — concrete schema in a sub-spec):
+Single SQLite file (`harbin.db`) via `aiosqlite`. SQLite earns its place: jobs/logs/schedule_state want indexed lookups, the workload is single-writer, the file is operationally trivial (one file, no daemon), and migrations are well-understood. Tables:
 
 ```
 fleets         (id, name, url, dock_path, registered_at)
 tasks          (id, fleet_id, task_id, cron, prompt, source_sha)
-jobs           (id, fleet_id, task_pk_nullable, prompt, source, started_at,
-                ended_at, status, exit_code, artifact_dir)
-job_log_chunks (job_id, seq, ts, stream, text)         -- bounded ring + on-disk log
+jobs           (id, short_id, fleet_id, task_pk_nullable, prompt, source,
+                started_at, ended_at, status, exit_code, artifact_dir)
+job_log_chunks (job_id, seq, ts, stream, text)   -- bounded ring + on-disk log
 schedule_state (task_pk, last_fire_ts)
-app_state      (key, value)                            -- schema_version, etc.
+app_state      (key, value)                       -- schema_version, last_vacuum_at
 ```
 
-Migrations are monotonic numbered scripts run on startup. A single `schema_version` row tracks where the DB is. There is no rollback — harbin's policy is *forward-only*; if a migration is wrong, fix it forward.
+- **One process-wide connection**, owned by a single `Store`, accessed only from the event loop. Single-connection keeps writer serialization trivial; the workload is small (hundreds of writes/hour).
+- **Pragmas applied at open:** `journal_mode=WAL`, `synchronous=NORMAL`, `foreign_keys=ON`, `busy_timeout=5000`.
+- **Timestamps** are UTC ISO-8601 strings (SQLite has no native timestamp type; TEXT keeps the file inspectable).
+- **Migrations** are forward-only, monotonic numbered scripts (`db/migrations/NNN_*.sql`) tracked by `app_state.schema_version`. If a migration is wrong, fix it forward. Harbin **refuses to start** if the DB's `schema_version` is greater than its own known max — the user must upgrade harbin.
+
+### 5.4 Logging — per-fleet, per-task, per-job
+
+Per-job logs are a **first-class feature**: they are the operator's primary audit trail and the main debugging surface for both agent behavior and harbin itself. The artifact tree **is** the log tree — there is no separate logs/ hierarchy:
+
+```
+artifacts/<fleet>/<task-id|adhoc>/<job-id>/
+  job.log         # append-only, authoritative; every line tagged stdout/stderr/system
+  <other agent artifacts…>
+```
+
+- **What's captured.** Agent stdout/stderr line-by-line, plus runner-synthesized `system` lines (`START`, `EXIT code=N`, `SIGNAL <name>`, cancel reason, post-job stash hash). Timestamps and stream tags live in `job_log_chunks` (SQLite); `job.log` carries the same lines as plain text for grep/tail.
+- **Hierarchy navigation.** The TUI exposes the artifact tree as a primary screen (§6.1) with three drill levels: **fleet → task (or `adhoc`) → job**. Each level shows the children sorted by recency and a glyph for the latest terminal status. The leaf opens a log/artifact viewer (live tail for active jobs, static for ended ones; filter by stream tag; jump-to-error highlights `system` and `stderr` lines).
+- **Retention.** Logs follow the artifact retention policy (§4.3) — when a job dir is swept, its log chunks are deleted with it. The `jobs` row stays as a history breadcrumb (`status='archived'`).
+- **App logger (harbin's own).** Separate from agent logs. Root logger `harbin`; subsystem children (`harbin.scheduler`, …). Sinks: rotating file (`paths.log_dir/harbin.log`, 5×5 MiB) + in-process ring (last 2000 lines, dumped to stderr on unhandled crash). Redaction scrubs `gh[ps]_[A-Za-z0-9]{36,}` and `Bearer\s+\S+` before lines hit either sink. **Agent stdio never enters the app logger** so a chatty agent cannot roll harbin's own log.
+- **Error taxonomy.** `HarbinError` → `UserError` (red console line), `FleetError` (warning row on the fleet — never crashes harbin), `InternalError` (modal + ERROR log). Unhandled exceptions are caught at TaskGroup boundaries and reclassified as `InternalError`.
 
 ---
 
@@ -253,95 +267,69 @@ Migrations are monotonic numbered scripts run on startup. A single `schema_versi
 ```
 ┌─ Header (Static) ────────────────────────────────────────────┐
 │  figlet logo  ·  command center for AI agents                │
-├─ JobMonitor (Container, border-title="monitor") ─────────────┤
-│  RowList of JobRow widgets, one per active+recent job        │
-│  [alt+N] ● running   <fleet>·<task-or-adhoc>   #<job-id>   <elapsed> │
-│  (empty state hints `@fleet …` or `/help`)                   │
+├─ ActiveJobs (Container, border-title="active") ──────────────┤
+│  [alt+1..9] ● running   <fleet>·<task-or-adhoc>  #<id>  <elapsed>
+│  one row per running/starting/queued job; empty state hint   │
+├─ RecentJobs (Container, border-title="recent") ──────────────┤
+│  ✓ success    <fleet>·<task-or-adhoc>  #<id>  <ended-at>     │
+│  last ~20 terminal jobs; read-only; press enter to open log  │
 ├─ Console (RichLog, border-title="console") ─ flex:1 ─────────┤
-│  Scrolling log of: user REPL input, brief acks, system       │
-│  events. Per-job stdio lives in its alt+N pane, not here.    │
+│  Scrolling log of: user input, acks, system events.          │
+│  Per-job stdio lives in its alt+N pane, not here.            │
 ├─ CommandLine (Input, prefix="> ") ───────────────────────────┤
-│  Slash-command + @fleet completion via Textual Suggester     │
+│  @fleet PROMPT  — ad-hoc prompts (only grammar accepted)     │
 ├─ StatusBar (Footer) ─────────────────────────────────────────┤
-│  N jobs · M fleets · active: <name> · alt+0 = overview       │
+│  N active · M recent · K fleets · alt+0=overview  alt+L=logs │
 └──────────────────────────────────────────────────────────────┘
 ```
 
 **Behaviors:**
 
-- `alt+0` returns to the overview screen (above).
-- `alt+1..9` focuses **job N** — replaces JobMonitor+Console with a single `JobView` containing the job's live stdio (RichLog) and a header (fleet, prompt, status, exit).
-- `esc` from a JobView returns to overview.
+- **ActiveJobs** and **RecentJobs** are visually and structurally separate. Active is always rendered first and never collapses; recent fills the remaining row budget. Active jobs are sorted by `started_at` ascending (oldest first, so a long runner stays put); recent by `ended_at` descending.
+- **alt+1..9** focuses the N-th **active** job — it opens a `JobView` (live stdio + status header). Recent jobs are not Alt-N addressable (their IDs change as jobs finish); open them with `enter` on the focused row, or via the log browser.
+- **alt+0** returns to the overview screen.
+- **alt+L** (or `enter` on an active/recent row) opens the **LogBrowser** — a three-pane drill: fleet → task → job → log/artifact viewer (§5.4).
+- **alt+F** opens the **Fleets** modal (CRUD + add). **alt+,** opens **Settings**. **alt+Q** is the quit shortcut (confirm if jobs are running). **esc** pops the current modal/screen back to overview.
 - The CommandLine is **always visible** at the bottom regardless of screen.
-- `/exit` mutates the prompt into a confirm-line: `quit? N jobs running [y/N]`. `y` quits (and SIGTERMs running jobs); anything else cancels.
 
-### 6.2 REPL — slash commands and `@fleet`
+### 6.2 CommandLine — `@fleet PROMPT`
 
-The CommandLine parses on first character:
+The CommandLine accepts a single grammar: `@<fleet> <prompt-text>`. Anything else is an error.
 
-| Starts with | Parsed as |
-|---|---|
-| `/` | slash command |
-| `@` | at-mention — ad-hoc prompt to a fleet |
-| anything else | error: *"start with `/` or `@`"* |
+- **Fleet name** matched against `^[a-z][a-z0-9-]{0,62}$`. Unknown fleet → `UserError` with a `difflib` did-you-mean suggestion.
+- **Prompt** is **the rest of the line, verbatim** — no shlex, no quote handling, no escapes. Prompts often contain quotes and shell metachars; tokenizing them mangles them.
+- Submission enqueues a job with `source=repl`. The Console prints one ack line: `queued #<short-id>  <fleet>·adhoc`.
+- Tab-complete `@<TAB>` cycles fleet names; the Textual `Suggester` shows ghost text for the first match.
+- Empty input is silently ignored.
 
-**At-mention:** `@<fleet> <prompt-text>` enqueues a job with `source=repl`. Tab-complete `@<TAB>` to a fleet picker.
+No slash commands. All discoverable functionality lives in shortcut keys + menus (§6.1, §6.3); operations like cancel, sync, view-schedule are surfaced on the focused row or in the relevant modal, not as typed commands. This keeps the typed surface tiny and the discoverability honest.
 
-**Slash commands (v1):**
+### 6.3 Settings — minimal
 
-```
-/help [cmd]              Lookup
-/jobs [--all]            List jobs (running + recent)
-/logs <job-id> [-f]      Tail a job's captured stdio
-/cancel <job-id>         Abort a running job
-/artifacts <fleet> […]   Browse artifact dirs
-/sync [fleet]            Force git fetch + ff
-/schedule [fleet]        Inspect cron + next-fire times
-/tunnel [start|stop|status]   Wrap `devtunnel host`
-/config                  Open the multi-page settings screen
-/exit                    Confirm + quit
-```
-
-Unknown slash commands surface a single-line "did you mean …?" via `difflib`. No hidden state.
-
-### 6.3 Configuration UX
-
-`/config` opens a `ModalScreen` with a sidebar of pages and a content pane:
+Settings open as a `ModalScreen` from `alt+,` or the Fleets modal's gear icon. Four pages, no more — anything that doesn't fit here uses defaults:
 
 ```
-┌─ /config ──────────────────────────────────────────────┐
-│ ▸ General         │  Theme            [harbor ▼]       │
-│   Fleets          │  Timezone         [system]         │
-│   Scheduler       │  Log verbosity    [info]           │
-│   Agent runner    │                                    │
-│   Artifacts       │                                    │
-│   Web UI          │                                    │
-│   Dev Tunnels     │                                    │
-│   Keybindings     │                                    │
-│   About           │  [ Save ]  [ Cancel ]              │
+┌─ settings ─────────────────────────────────────────────┐
+│ ▸ Fleets          │  (CRUD; the load-bearing page)     │
+│   General         │  Theme, timezone                   │
+│   Agent runner    │  agent_cli command, kill grace     │
+│   About           │  Version, paths, link to logs      │
+│                   │  [ Save ]  [ Cancel ]              │
 └────────────────────────────────────────────────────────┘
 ```
 
-**Pages:**
+- **Fleets** is the centerpiece: registered fleets in rows, per-row drawer with sync interval, retention, `[ Remove fleet ]`. `+ Add fleet` is a two-step wizard (paste git URL → confirm clone path).
+- **General** is just theme and timezone. `log_verbosity` follows a sensible default and isn't surfaced.
+- **Agent runner** carries the global `agent_cli.command` (the one essential piece; nothing else) and `kill_grace_seconds`. Concurrency caps follow defaults.
+- **About** is read-only — version, the four resolved paths, a link that opens `harbin.log`.
 
-- **General** — theme, timezone, log verbosity.
-- **Fleets** — CRUD for registered fleets. Per-row drawer: sync interval override, push policy, artifact retention, **Remove fleet**. `+ Add fleet` is a two-step wizard: paste git URL → confirm clone path → done. Fleet management is **menu-only**, intentionally absent from the slash-command surface.
-- **Scheduler** — tick rate, missed-fire policy (currently `skip` only).
-- **Agent runner** — global `agent_cli` (default for all fleets), default per-dock concurrency, global cap, kill grace period.
-- **Artifacts** — root path, default retention, sweep schedule.
-- **Web UI** — port, host, auto-start on launch.
-- **Dev Tunnels** — `devtunnel` binary path, named tunnel ID, anonymous-allowed (default no).
-- **Keybindings** — view + edit overrides.
-- **About** — version, paths, link to logs.
+Persistence: `~/.config/harbin/config.yaml`, pydantic-validated on save. A wholly-empty `config.yaml` is valid (every leaf has a default); on first launch harbin writes a fully-defaulted file. Boot-time `config.yaml` errors → harbin refuses to start. Per-fleet errors (`fleet.yaml` / `schedule.yaml`) disable that fleet only and surface a warning row.
 
-Persistence: `~/.config/harbin/config.yaml`, pydantic-validated on save.
+**Retention grammar.** `<int>(s|m|h|d)` — e.g. `30d`, `12h`, `365d`. Literal `never` is not supported (deletion-footgun).
 
-### 6.4 Web UI + Dev Tunnels
+### 6.4 Web UI + tunnels (deferred)
 
-- **Web UI.** `harbin serve [--port 8080] [--host 127.0.0.1]` runs the *same* Textual app via `textual-serve`. No separate HTML/CSS to maintain; visual style follows the chosen palette automatically.
-- **Local auth.** None by default. With `--host 0.0.0.0` the user is recommended (in docs and at startup) to front it with a tunnel rather than expose the port directly.
-- **Dev Tunnels wrapper.** `/tunnel start` runs the equivalent of `devtunnel host -p <serve-port> --allow-anonymous false`. Before starting, harbin checks `devtunnel user show`. If the user is not logged in, harbin prints the exact `devtunnel user login -g` command (GitHub OAuth) and exits the wrapper — it does **not** drive an interactive auth flow itself. The tunnel runs as a separate subprocess; its lifetime is **not** coupled to harbin's. `/tunnel status` reports the public URL; `/tunnel stop` terminates the subprocess.
-- **Install guide.** A standalone document at `doc/remote-access.md` walks the user through installing `devtunnel` on Windows / macOS / Linux and performing the one-time GitHub auth. The guide is referenced from `/tunnel`'s help text.
+Out of scope for v1. The architecture stays single-process and TUI-only. A future enhancement may add a `harbin serve` mode (textual-serve over WebSocket) and an external-tunnel wrapper; both are explicitly deferred so the v1 surface stays narrow.
 
 ---
 
@@ -365,7 +353,7 @@ Persistence: `~/.config/harbin/config.yaml`, pydantic-validated on save.
 - **Sharp Frame borders** with title labels (`┌─ monitor ─…─┐`).
 - **Generous spacing** — vertical rhythm over density.
 - **Status conveyed by glyph + color**: `●` running, `○` queued, `✓` success, `✗` failed, `⚠` warning. Color is reinforcement, not the only channel — accessible on color-poor terminals.
-- **Themes are swappable at runtime** via `/config → General → Theme`.
+- **Themes are swappable at runtime** via Settings → General → Theme.
 
 ---
 
@@ -377,11 +365,11 @@ Both sample fleets live as standalone GitHub repos and are *not* vendored into t
 
 **URL:** `https://github.com/dryotta/harbin-agent-sample-news`
 
-**Demonstrates:** cron-driven task · markdown artifact · push-back-to-repo.
+**Demonstrates:** cron-driven task · markdown artifact · agent-driven `git push`.
 
 ```
 .harbin/
-  fleet.yaml       # push_back: true; retain: 365d
+  fleet.yaml       # retain: 365d
   schedule.yaml    # 07:00 daily, prompt writes brief-YYYY-MM-DD.md
 .github/
   copilot-instructions.md
@@ -390,7 +378,7 @@ skills/
   source-rules.md  # "prefer official blog over tabloid", etc.
 ```
 
-**Cadence:** once daily at 07:00 local. **Artifact:** `brief-YYYY-MM-DD.md`. **Push-back:** commits to `briefs/` so the repo accumulates an archive over time.
+**Cadence:** once daily at 07:00 local. **Artifact:** `brief-YYYY-MM-DD.md`. The agent's own prompt commits the brief to `briefs/` and runs `git push` as part of the job (harbin never pushes); any uncommitted leftovers are stashed by harbin post-job (§4.2).
 
 ### 8.2 `harbin-agent-sample-price-monitor` — periodic price check
 
@@ -400,7 +388,7 @@ skills/
 
 ```
 .harbin/
-  fleet.yaml       # push_back: false; retain: 30d
+  fleet.yaml       # retain: 30d
   schedule.yaml    # hourly
   watchlist.yaml   # tickers + thresholds (fleet-local config the prompt reads)
 .github/
@@ -408,7 +396,7 @@ skills/
   agents/price-checker.md
 ```
 
-**Cadence:** hourly. **Artifact:** `prices.json` per run (diffs preserved as `prices-<utc>.json`). **Alert path:** the prompt instructs the agent to write `alert.txt` when a threshold is crossed; the corresponding job's monitor row shows `⚠ 1 alert` so the operator sees it on next visit.
+**Cadence:** hourly. **Artifact:** `prices.json` per run (diffs preserved as `prices-<utc>.json`). **Alert path:** the prompt instructs the agent to write `alert.txt` when a threshold is crossed; the corresponding job's recent-row shows `⚠ 1 alert` so the operator sees it on next visit.
 
 ### 8.3 What the harbin repo contains
 
@@ -419,10 +407,12 @@ A directory `examples/` in this repo documents each sample with prose explaining
 ## 9 · Distribution & install
 
 - **Primary install:** `uv tool install harbin`. Mirrors toad's distribution model and gives users a fast, reproducible global install.
-- **From source:** `git clone <harbin> && uv sync && uv run harbin`.
-- **Curl-pipe-sh installer:** a tiny script that delegates to `uv tool install harbin` is **post-v1**. Not a blocker.
-- **Supported platforms:** macOS, Linux, and **Windows natively**. Windows Terminal is strongly recommended for full glyph and color fidelity; legacy `conhost.exe` works with degraded rendering (same caveat every Textual app has). WSL2 is supported but not required.
+- **From source:** `git clone <harbin> && uv sync --extra dev && uv run harbin`.
+- **Curl-pipe-sh installer:** a tiny script that delegates to `uv tool install harbin` is **post-v1**.
+- **Supported platforms:** Linux and macOS (tier 1, full CI), Windows 11 native (tier 1, Windows Terminal recommended), Windows 10 and WSL2 (tier 2 — best-effort). Snapshot tests are Linux-only in CI (Windows terminal rendering on runners is unreliable; users are unaffected).
 - **Path handling:** `pathlib.Path` throughout — never raw string concatenation — so the Windows/POSIX split is invisible above the Dock and Artifact managers.
+- **Windows long paths.** Artifact trees can exceed `MAX_PATH` (260 chars). Users who hit this enable the long-path policy once via registry; harbin does **not** prepend `\\?\` itself.
+- **Versioning.** `hatch-vcs` derives version from the latest git tag. Pre-1.0: breaking changes bump **minor**; post-1.0 bump **major**. The DB refuses to open if its `schema_version` exceeds the binary's known max.
 
 ---
 
@@ -431,43 +421,30 @@ A directory `examples/` in this repo documents each sample with prose explaining
 These are explicitly **not** in v1. Each is a candidate for a later phase, but mentioning them here prevents scope creep during implementation.
 
 - **Daemon / background mode.** Foreground only. No `systemd` unit, no `launchd` plist, no service install. (See §3.2.)
-- **Missed-fire catchup.** If harbin was off, the cron firing is lost. Opt-in `catchup` policy is a v2 candidate.
-- **Multiple agents per fleet.** A fleet's prompt may *role-play* whichever agent it wants, but harbin does not track agent identities. `@fleet/agent` syntax is **not** in v1.
-- **PTY / literal shell panes.** The monitor pane shows agent jobs only. No `/new powershell` or terminal multiplexing.
+- **Web UI / remote access.** No `harbin serve`, no embedded WebSocket transport, no tunnel wrapper. The TUI is the only surface in v1.
+- **Harbin-driven `git push`.** Harbin never publishes — it only pulls, runs, and stashes. Agents that need to publish do so within the job's own prompt.
+- **Missed-fire catchup.** If harbin was off, the cron firing is lost. Opt-in `catchup` policy is a future candidate.
+- **Per-job wall-clock timeout.** Agents run until they exit; operators wrap with `timeout(1)` if needed.
+- **Multiple agents per fleet.** A fleet's prompt may *role-play* whichever agent it wants, but harbin does not track agent identities. `@fleet/agent` syntax is not in v1.
+- **Non-stdin invocation modes.** The agent CLI receives its prompt on stdin and nothing else in v1. Flag- and tempfile-based modes are deferred until a real use case demands them.
 - **Conversation continuity.** Each job is one-shot — there is no resume-this-conversation primitive.
 - **Multi-user / hosted harbin.** Harbin is single-tenant by design.
-- **In-app `devtunnel` install.** The user installs `devtunnel` themselves; harbin only wraps the running binary.
+- **Plugin / extension system.** No registration mechanism for third-party commands or screens.
+- **Active disk quotas / per-fleet budgets.** Retention is the only space-reclamation mechanism.
+- **Per-fleet rename.** Editing `fleet.yaml.name` post-registration is rejected with a clear error.
 
 ---
 
-## 11 · Sub-specs
+## 11 · Dev workflow
 
-The sub-specs below complement this north-star document. Each owns a single subsystem or cross-cutting concern, pinned at medium depth: shapes and key decisions concrete, smaller details left to convention. They share a folder with this overview (`doc/design/`) and cross-reference one another by filename.
+| Step | Command |
+|---|---|
+| Bootstrap | `uv sync --extra dev` |
+| Run from source | `uv run harbin` |
+| Lint + format check | `uv run ruff check . && uv run ruff format --check .` |
+| Typecheck | `uv run mypy` |
+| Test (all lanes) | `uv run pytest` |
 
-**Foundations** — engineering substrate referenced by every other doc.
+CI runs lint + typecheck + unit on every push; integration + snapshot on PRs. All four gates must be green.
 
- 1. [`01-project-layout`](./01-project-layout.md) — source tree, `pyproject.toml`, entry points, `platformdirs` paths, dev workflow.
- 2. [`02-state-store`](./02-state-store.md) — SQLite schema, migration framework, log-chunk ring, hot-path queries.
- 3. [`03-configuration`](./03-configuration.md) — pydantic schemas for `config.yaml` / `fleet.yaml` / `schedule.yaml`, validation, hot reload.
- 4. [`04-concurrency-and-errors`](./04-concurrency-and-errors.md) — event loop, lifecycle, signals, error taxonomy, app logging.
- 5. [`05-testing-strategy`](./05-testing-strategy.md) — pytest layout, fake agent CLI, snapshot tests, CI lanes.
- 6. [`06-packaging-and-install`](./06-packaging-and-install.md) — `uv tool install harbin`, platforms, first-run UX, `sample-fleet add`.
-
-**Fleet plane** — fleets, docks, artifacts (overview §4).
-
- 7. [`07-fleet-and-dock-manager`](./07-fleet-and-dock-manager.md) — dock filesystem layout, git sync, watchdog hot reload, push-back.
- 8. [`08-artifact-manager`](./08-artifact-manager.md) — artifact directory layout, `HARBIN_ARTIFACT_DIR`, retention sweep, browser.
-
-**Execution plane** — scheduler, runner, agent-CLI contract (overview §5).
-
- 9. [`09-scheduler`](./09-scheduler.md) — tick loop, croniter, missed-fire skip, DST handling, schedule hot-reload diff.
-10. [`10-agent-runner`](./10-agent-runner.md) — job state machine, subprocess spawn, stdio pipeline, cancellation, concurrency gating.
-11. [`11-agent-cli-invocation`](./11-agent-cli-invocation.md) — invocation modes (stdin / flag / tempfile), defaults, per-fleet override.
-
-**Interaction plane** — TUI, REPL, web/tunnels (overview §6).
-
-12. [`12-tui-architecture`](./12-tui-architecture.md) — Textual app shell, screens, widgets, theme, key bindings, `/config` modal.
-13. [`13-repl-and-commands`](./13-repl-and-commands.md) — `/` and `@` grammar, tab completion, per-command spec.
-14. [`14-web-ui-and-tunnels`](./14-web-ui-and-tunnels.md) — `harbin serve` (textual-serve), `/tunnel` (devtunnel wrapper).
-
-**Reading order.** A contributor new to harbin reads sequentially. A contributor touching one subsystem reads the relevant sub-spec plus its foundations dependencies (every sub-spec calls these out at the top).
+**Test lanes** mirror the source layout: `tests/unit/` (no subprocess / no real git, < 5 s), `tests/integration/` (real local git in temp dirs, real SQLite, fake agent CLI, < 60 s), `tests/snapshot/` (Textual snapshot tests, Linux only in CI). A `fake_agent_cli.py` fixture reads its prompt from stdin (matching the v1 invocation contract) and honors `HARBIN_FAKE_EXIT` and `HARBIN_FAKE_DURATION` to drive failure / cancel paths.
