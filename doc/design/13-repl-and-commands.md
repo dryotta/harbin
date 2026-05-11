@@ -36,7 +36,7 @@ Unclosed quotes are a `ParseError` with the column noted. The first token is the
 @<fleet-name> <prompt text…>
 ```
 
-The fleet name is matched against `^[a-z][a-z0-9-]{1,30}$` (overview §4.1). The **rest of the line** — verbatim, including leading/trailing whitespace trimmed — becomes the prompt. No `shlex` involved; prompts often contain quotes and shell metachars and should be left alone.
+The fleet name is matched against `^[a-z][a-z0-9-]{0,62}$` (overview §4.1; widened in IMPLEMENTATION_NOTES.md §17 from the original `{1,30}` to fit real-world repo names up to 63 chars). The **rest of the line** — verbatim, including leading/trailing whitespace trimmed — becomes the prompt. No `shlex` involved; prompts often contain quotes and shell metachars and should be left alone.
 
 Validation:
 

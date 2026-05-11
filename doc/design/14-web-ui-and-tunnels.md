@@ -23,7 +23,7 @@ harbin serve [--port PORT] [--host HOST]
 Behavior:
 
 1. Run the normal startup sequence ([`04-concurrency-and-errors`](./04-concurrency-and-errors.md) §2) **without** mounting the local Textual app.
-2. Call `textual_serve.server.Server(app_target="harbin.tui.app:HarbinApp", port=port, host=host).serve_blocking()`. This binds the socket and serves the app to any connecting client.
+2. Call `textual_serve.server.Server(command="harbin", port=port, host=host).serve()`. This binds the socket and serves the app to any connecting client. The installed `textual-serve` exposes a `command=<str>` constructor (one subprocess per WebSocket connection); the original draft of this sub-spec named an `app_target` parameter that does not exist in the public API. Shared backend state is provided by the single SQLite file via WAL.
 3. Print a single line to stderr: `harbin serving on http://<host>:<port>/`.
 4. If `--host` is `0.0.0.0` (or otherwise non-loopback), additionally print:
    ```
@@ -48,7 +48,7 @@ textual-serve renders the Textual app to a browser-side terminal emulator. Impli
 
 - Mouse and clipboard work via the browser; keyboard chords behave as they do in any terminal in the browser.
 - Glyph fidelity depends on the browser font; consider serving a recommended monospace via simple HTML wrapper (post-v1).
-- A single textual-serve session is **per-connection** — multiple browsers can connect and each gets an independent harbin TUI session **bound to the same backend state**. State writes coordinate through the single `AppCore` (no extra locking — the event loop is the lock).
+- Each WebSocket connection spawns a **separate** harbin subprocess (the constructor is `Server(command="harbin")`). Backend state is shared through the on-disk SQLite database (WAL mode — sub-spec 02 §1) so two browser sessions see the same fleets/jobs/schedules. They do **not** share in-memory state (live job ring buffers, scheduler tick state, tunnel handle) — a job's live stdio tail is visible only in the session whose harbin process spawned the agent. Concurrent writers to the SQLite file are safe because of `busy_timeout` + WAL.
 
 ---
 

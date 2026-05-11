@@ -1,0 +1,6 @@
+[submodule "examples/harbin-agent-sample-news"]
+	path = examples/harbin-agent-sample-news
+	url = https://github.com/dryotta/harbin-agent-sample-news.git
+[submodule "examples/harbin-agent-sample-price-monitor"]
+	path = examples/harbin-agent-sample-price-monitor
+	url = https://github.com/dryotta/harbin-agent-sample-price-monitor.git

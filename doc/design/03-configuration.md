@@ -105,7 +105,7 @@ If `config.yaml` is missing on startup, harbin writes a fully-defaulted file via
 **Location:** `<dock>/.harbin/fleet.yaml`. Required for a directory to qualify as a fleet (overview §4.1).
 
 ```yaml
-name: my-fleet           # pattern: ^[a-z][a-z0-9-]{1,30}$; unique across the install
+name: my-fleet           # pattern: ^[a-z][a-z0-9-]{0,62}$; unique across the install
 default_branch: main
 
 agent_cli: null          # null = inherit global; or same shape as config.agent_runner.agent_cli

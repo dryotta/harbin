@@ -1,2 +1,33 @@
 # Brainstorming companion artifacts
 .superpowers/
+
+# Python / packaging
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+*.so
+
+# uv / virtualenv
+.venv/
+.python-version
+
+# Testing / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+.tox/
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Runtime state (when running harbin from source with HARBIN_HOME=./.harbin-home)
+.harbin-home/
