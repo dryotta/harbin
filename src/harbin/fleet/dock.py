@@ -446,9 +446,15 @@ class DockManager:
 
         # Stage everything in the dock tree. This catches both artifact_dir
         # writes (when the dir is inside the dock) and agent-written archive
-        # copies elsewhere in the worktree. Operating on the dock root is
-        # safe because the periodic sync loop has already guaranteed the
-        # tree was clean *before* the job ran.
+        # copies elsewhere in the worktree.
+        #
+        # Safety: the *runner*'s pre-spawn `git status --porcelain` snapshot
+        # (see `_LiveJob.pre_dirty` and `_spawn_and_run` in
+        # `harbin.runner.runner`) is the actual guarantee that user-local
+        # edits don't sneak in here — if the dock was dirty before the job
+        # ran, the runner short-circuits and never calls push_back. The
+        # periodic sync loop only *reports* dirtiness in the monitor row;
+        # it does NOT clean the tree or block job dispatch.
         add = await _git("add", "-A", cwd=dock)
         if add.returncode != 0:
             return f"push-back: git add failed: {add.stderr.strip()}"
