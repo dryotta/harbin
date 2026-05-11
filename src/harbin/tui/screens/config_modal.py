@@ -51,9 +51,7 @@ class ConfigModalScreen(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with Grid(id="config-grid"):
-            sidebar = Vertical(id="config-sidebar")
-            sidebar.styles.width = 22
-            yield sidebar
+            yield Vertical(id="config-sidebar")
             self._content_container = VerticalScroll(id="config-pane")
             yield self._content_container
 
@@ -62,19 +60,64 @@ class ConfigModalScreen(ModalScreen):
         for key, label in _PAGES:
             btn = Button(label, id=f"page-{key}")
             sidebar.mount(btn)
+        self._mark_active_sidebar()
         # Schedule the initial render as an async task so its
         # ``remove_children`` await completes before any pre-existing
         # content collides with new ids.
         self.run_worker(self._render_page(), exclusive=True)
 
+    def _mark_active_sidebar(self) -> None:
+        """Highlight the currently-selected page button in the sidebar."""
+        try:
+            for btn in self.query("#config-sidebar Button").results(Button):
+                if btn.id == f"page-{self._page}":
+                    btn.add_class("-active")
+                else:
+                    btn.remove_class("-active")
+        except Exception:
+            pass
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id and event.button.id.startswith("page-"):
             self._page = event.button.id.removeprefix("page-")
+            self._mark_active_sidebar()
             self.run_worker(self._render_page(), exclusive=True)
         elif event.button.id == "save":
             self._save()
         elif event.button.id == "cancel":
             self.app.pop_screen()
+        elif event.button.id == "add-fleet":
+            self.run_worker(self._add_fleet(), exclusive=True)
+
+    async def _add_fleet(self) -> None:
+        """Clone + register a new fleet from the URL Input on the Fleets page."""
+        try:
+            url_input = self.query_one("#fleet-url", Input)
+        except Exception:
+            return
+        url = url_input.value.strip()
+        if not url:
+            self._ctx.console_writer("[error]paste a git URL first[/error]")
+            return
+        self._ctx.console_writer(f"cloning {url}…")
+        try:
+            state = await self._ctx.dock_manager.register_fleet(url)
+        except Exception as e:
+            self._ctx.console_writer(f"[error]could not add fleet: {e}[/error]")
+            return
+        self._ctx.console_writer(f"registered fleet '{state.row.name}' at {state.row.dock_path}")
+        # Reconcile the scheduler so any new cron tasks land.
+        try:
+            from harbin.scheduler import Scheduler  # avoid import-time cycle
+
+            sched: Scheduler | None = getattr(self._ctx, "scheduler", None)
+            if sched is not None:
+                await sched.reconcile_all()
+        except Exception:
+            pass
+        # Re-render the page so the new fleet appears in the list.
+        url_input.value = ""
+        await self._render_page()
 
     async def _render_page(self) -> None:
         assert self._content_container is not None

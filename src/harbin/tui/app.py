@@ -6,6 +6,7 @@ from typing import ClassVar
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.containers import Horizontal
 from textual.widgets import Static
 
 from harbin.context import AppContext
@@ -51,7 +52,12 @@ class HarbinApp(App):
     # ───────────────────────── compose ──────────────────────────
 
     def compose(self) -> ComposeResult:
-        yield Static(LOGO + "command center for AI agents", id="header")
+        with Horizontal(id="header"):
+            yield Static(LOGO, id="header-logo")
+            yield Static(
+                "harbin · command center for AI agents",
+                id="header-tagline",
+            )
         yield OverviewView()
         yield CommandLine(suggester=self._suggester)
         yield StatusBar()

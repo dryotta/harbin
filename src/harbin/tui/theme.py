@@ -52,11 +52,11 @@ STATUS_TOKEN: dict[str, str] = {
 }
 
 
-LOGO = r"""
- _              _    _
-| |__   __ _ _ _| |__(_)_ _
-| '_ \ / _` | '_| '_ \ | ' \
-|_||_/_\\__,_|_| |_.__/_|_||_|
+LOGO = r""" _                _     _
+| |__   __ _ _ __| |__ (_)_ __
+| '_ \ / _` | '__| '_ \| | '_ \
+| | | | (_| | |  | |_) | | | | |
+|_| |_|\__,_|_|  |_.__/|_|_| |_|
 """
 
 
@@ -69,11 +69,29 @@ Screen {{
 }}
 
 #header {{
-    color: {palette["accent"]};
     background: {palette["bg"]};
     padding: 0 1;
-    height: 4;
+    height: 7;
     border-bottom: solid {palette["accent"]};
+}}
+
+#header-logo {{
+    color: {palette["accent"]};
+    width: 36;
+    height: 5;
+    content-align: left top;
+}}
+
+#header-tagline {{
+    color: {palette["muted"]};
+    width: 1fr;
+    height: 5;
+    content-align: left bottom;
+    padding: 0 1;
+}}
+
+#overview {{
+    height: 1fr;
 }}
 
 #monitor {{
@@ -82,8 +100,8 @@ Screen {{
     background: {palette["bg"]};
     margin: 0;
     padding: 0 1;
-    height: 1fr;
-    min-height: 6;
+    height: auto;
+    min-height: 3;
     max-height: 50%;
 }}
 
@@ -129,10 +147,85 @@ JobHeader {{
     height: 2;
 }}
 
-ConfigSidebar {{
-    width: 18;
+/* ───────────────────────── /config modal ───────────────────────── */
+
+ConfigModalScreen {{
+    align: center middle;
+}}
+
+#config-grid {{
+    grid-size: 2 1;
+    grid-columns: 22 1fr;
+    width: 90%;
+    height: 80%;
+    border: round {palette["accent"]};
+    background: {palette["bg"]};
+    padding: 0;
+}}
+
+#config-sidebar {{
+    width: 22;
     background: {palette["bg"]};
     border-right: solid {palette["accent"]};
+    padding: 1;
+}}
+
+#config-sidebar Button {{
+    width: 100%;
+    height: 1;
+    background: {palette["bg"]};
+    color: {palette["fg"]};
+    border: none;
+    text-style: none;
+    margin: 0 0 0 0;
+    padding: 0 1;
+}}
+
+#config-sidebar Button:hover {{
+    background: {palette["accent"]} 20%;
+    color: {palette["accent"]};
+}}
+
+#config-sidebar Button.-active {{
+    background: {palette["accent"]} 30%;
+    color: {palette["accent"]};
+    text-style: bold;
+}}
+
+#config-pane {{
+    padding: 1 2;
+    background: {palette["bg"]};
+}}
+
+#config-pane Label {{
+    color: {palette["muted"]};
+    margin: 1 0 0 0;
+}}
+
+#config-pane Input {{
+    background: {palette["bg"]};
+    color: {palette["fg"]};
+    border: tall {palette["accent"]};
+    height: 3;
+    margin: 0 0 0 0;
+}}
+
+#config-pane Button {{
+    background: {palette["bg"]};
+    color: {palette["accent"]};
+    border: tall {palette["accent"]};
+    height: 3;
+    margin: 1 1 0 0;
+    min-width: 10;
+}}
+
+#config-pane Button:hover {{
+    background: {palette["accent"]} 20%;
+}}
+
+#config-pane Static {{
+    color: {palette["fg"]};
+    margin: 0;
 }}
 
 .dirty {{ color: {palette["activity"]}; }}

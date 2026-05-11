@@ -138,7 +138,7 @@ async def test_landing_layout_vertical_order(harbin_paths) -> None:
         async with app.run_test(headless=True) as pilot:
             await pilot.pause()
             await pilot.pause()
-            header = app.query_one("#header", Static)
+            header = app.query_one("#header")
             overview = app.query_one("#overview")
             ci = app.query_one("#commandline", Input)
             sb = app.query_one(StatusBar)
@@ -177,11 +177,13 @@ async def test_landing_layout_matches_spec(harbin_paths) -> None:
             await pilot.pause()
             await pilot.pause()
 
-            # 1. Header widget exists and contains the logo text + tagline.
-            header = app.query_one("#header", Static)
-            text = header.render()
-            text_str = str(text)
-            assert "harbin" in text_str.lower() or "command center" in text_str.lower(), text_str
+            # 1. Header container exists; logo + tagline are children.
+            header = app.query_one("#header")
+            assert header is not None
+            logo = app.query_one("#header-logo", Static)
+            tagline = app.query_one("#header-tagline", Static)
+            assert "harbin" in str(tagline.render()).lower(), tagline.render()
+            assert "_" in str(logo.render()) or "|" in str(logo.render()), logo.render()
 
             # 2. Monitor panel exists.
             assert app.query("#monitor"), "monitor panel must exist on the landing screen"
@@ -529,5 +531,504 @@ async def test_status_bar_shows_overview_initially(harbin_paths) -> None:
             assert "overview" in text.lower(), text
             # And shows "0 fleets" at the start.
             assert "0 fleets" in text, text
+    finally:
+        await core.shutdown()
+
+
+# ─────────────────────── /config → Fleets → Add ─────────────────────
+
+
+async def test_config_add_fleet_flow_end_to_end(harbin_paths, tmp_path) -> None:
+    """Reproduce the user-reported "can't add a github repo" flow.
+
+    Opens /config, clicks the Fleets sidebar button, types a (local
+    bare-repo) git URL into the URL Input, clicks "Add fleet", and
+    verifies:
+
+    1. console writes a success message,
+    2. ``ctx.dock_manager.states`` gains the new fleet,
+    3. the URL input is cleared (i.e. the page re-rendered),
+    4. the in-memory store has the fleet row.
+    """
+    from harbin.tui.screens.config_modal import ConfigModalScreen
+
+    bare, src = _make_local_fleet(tmp_path, "added-via-ui")
+    shutil.rmtree(src, ignore_errors=True)  # we only need the bare remote
+
+    core, app = await _boot()
+    try:
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            await _submit(pilot, app, "/config")
+            for _ in range(8):
+                if any(isinstance(s, ConfigModalScreen) for s in app.screen_stack):
+                    break
+                await pilot.pause()
+            modal = next(s for s in app.screen_stack if isinstance(s, ConfigModalScreen))
+
+            # Navigate to the Fleets sidebar page.
+            fleets_btn = modal.query_one("#page-fleets", Button)
+            fleets_btn.press()
+            for _ in range(8):
+                await pilot.pause()
+                if modal.query("#fleet-url"):
+                    break
+            url_input = modal.query_one("#fleet-url", Input)
+            url_input.value = str(bare)
+            add_btn = modal.query_one("#add-fleet", Button)
+            add_btn.press()
+
+            # Worker is async; wait for the dock_manager.states to update.
+            for _ in range(150):
+                if "added-via-ui" in {s.row.name for s in app.ctx.dock_manager.states.values()}:
+                    break
+                await asyncio.sleep(0.1)
+            names = {s.row.name for s in app.ctx.dock_manager.states.values()}
+            assert "added-via-ui" in names, names
+
+            text = _console_text(app)
+            assert "registered fleet" in text.lower() and "added-via-ui" in text, text
+
+            # The URL input was cleared as part of the re-render.
+            url_input_after = modal.query_one("#fleet-url", Input)
+            assert url_input_after.value == "", url_input_after.value
+
+            # The store row is real and discoverable by the rest of harbin.
+            row = await app.ctx.store.get_fleet_by_name("added-via-ui")
+            assert row is not None
+            assert row.url == str(bare)
+    finally:
+        await core.shutdown()
+
+
+async def test_config_add_fleet_empty_url_errors(harbin_paths) -> None:
+    """Clicking Add fleet with a blank URL surfaces a user error, not a crash."""
+    from harbin.tui.screens.config_modal import ConfigModalScreen
+
+    core, app = await _boot()
+    try:
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            await _submit(pilot, app, "/config")
+            for _ in range(8):
+                if any(isinstance(s, ConfigModalScreen) for s in app.screen_stack):
+                    break
+                await pilot.pause()
+            modal = next(s for s in app.screen_stack if isinstance(s, ConfigModalScreen))
+            modal.query_one("#page-fleets", Button).press()
+            for _ in range(8):
+                await pilot.pause()
+                if modal.query("#add-fleet"):
+                    break
+            add_btn = modal.query_one("#add-fleet", Button)
+            add_btn.press()
+            await pilot.pause()
+            await pilot.pause()
+            text = _console_text(app)
+            assert "paste a git url" in text.lower() or "url" in text.lower(), text
+    finally:
+        await core.shutdown()
+
+
+async def test_config_add_fleet_bad_url_surfaces_error(harbin_paths, tmp_path) -> None:
+    """A URL that ``git clone`` rejects shows a friendly error and does not crash."""
+    from harbin.tui.screens.config_modal import ConfigModalScreen
+
+    core, app = await _boot()
+    try:
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            await _submit(pilot, app, "/config")
+            for _ in range(8):
+                if any(isinstance(s, ConfigModalScreen) for s in app.screen_stack):
+                    break
+                await pilot.pause()
+            modal = next(s for s in app.screen_stack if isinstance(s, ConfigModalScreen))
+            modal.query_one("#page-fleets", Button).press()
+            for _ in range(8):
+                await pilot.pause()
+                if modal.query("#fleet-url"):
+                    break
+            url_input = modal.query_one("#fleet-url", Input)
+            # Local path that genuinely does not exist → git clone fails.
+            url_input.value = str(tmp_path / "definitely-does-not-exist")
+            modal.query_one("#add-fleet", Button).press()
+            # Wait for the worker to surface its error to the console.
+            for _ in range(150):
+                text = _console_text(app)
+                if "could not add fleet" in text.lower() or "error" in text.lower():
+                    break
+                await asyncio.sleep(0.1)
+            text = _console_text(app)
+            assert "could not add fleet" in text.lower() or "error" in text.lower(), text
+            # Nothing was registered.
+            names = {s.row.name for s in app.ctx.dock_manager.states.values()}
+            assert not names
+    finally:
+        await core.shutdown()
+
+
+# ──────────────────────── /config save round-trip ──────────────────
+
+
+async def test_config_save_writes_yaml_and_propagates(harbin_paths) -> None:
+    """Edit a field, press Save: config.yaml on disk reflects the change."""
+    from harbin.tui.screens.config_modal import ConfigModalScreen
+
+    core, app = await _boot()
+    try:
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            await _submit(pilot, app, "/config")
+            for _ in range(8):
+                if any(isinstance(s, ConfigModalScreen) for s in app.screen_stack):
+                    break
+                await pilot.pause()
+            modal = next(s for s in app.screen_stack if isinstance(s, ConfigModalScreen))
+            # General page renders by default; wait for inputs.
+            for _ in range(8):
+                if modal.query("#timezone"):
+                    break
+                await pilot.pause()
+            tz_input = modal.query_one("#timezone", Input)
+            tz_input.value = "UTC"
+            save_btn = modal.query_one("#save", Button)
+            save_btn.press()
+            # Wait for the save to land + modal pop.
+            for _ in range(40):
+                if not any(isinstance(s, ConfigModalScreen) for s in app.screen_stack):
+                    break
+                await pilot.pause()
+            cfg_path = app.ctx.paths.config_dir / "config.yaml"
+            assert cfg_path.exists(), cfg_path
+            text = cfg_path.read_text(encoding="utf-8")
+            assert "UTC" in text, text
+            # In-memory snapshot updated, too.
+            assert app.ctx.config.timezone == "UTC"
+    finally:
+        await core.shutdown()
+
+
+# ────────────────────────── /logs, /cancel ─────────────────────────
+
+
+async def test_logs_unknown_job_errors(harbin_paths) -> None:
+    """``/logs nope`` surfaces an unknown-job error to the console."""
+    core, app = await _boot()
+    try:
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            await _submit(pilot, app, "/logs nope")
+            text = _console_text(app)
+            assert "nope" in text.lower() and "unknown" in text.lower(), text
+    finally:
+        await core.shutdown()
+
+
+async def test_logs_command_shows_captured_stdio(harbin_paths, tmp_path) -> None:
+    """After a fake-agent job, ``/logs <short-id>`` prints its captured output."""
+    bare, _src = _make_local_fleet(tmp_path, "logs-fleet")
+    core = await AppCore.startup()
+
+    def writer(s: str) -> None:
+        inst = HarbinApp._instance
+        if inst is not None:
+            inst._write_console(s)
+            return
+        print(s)
+
+    core.set_console_writer(writer)
+    assert core.dock_manager is not None and core.runner is not None
+    state = await core.dock_manager.register_fleet(str(bare))
+    fake = Path(__file__).resolve().parents[1] / "fixtures" / "fake_agent_cli.py"
+    from harbin.config.models import AgentCli
+
+    core.runner.update_runtime_config(
+        agent_cli=AgentCli(command=[sys.executable, str(fake)], mode="stdin")
+    )
+    ctx = core.make_context()
+    app = HarbinApp(ctx)
+    try:
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            row = await core.runner.enqueue(
+                fleet=state.row, prompt="hi-there", source="repl", task_label="adhoc"
+            )
+            # Wait for the agent to complete.
+            for _ in range(150):
+                job = await core.store.get_job_by_short_id(row.short_id)
+                if job and job.status in {"success", "failed"}:
+                    break
+                await asyncio.sleep(0.1)
+            await _submit(pilot, app, f"/logs {row.short_id}")
+            text = _console_text(app)
+            # Fake agent writes START / END to stdout; either should show.
+            assert "START" in text or "END" in text, text
+    finally:
+        await core.shutdown()
+
+
+async def test_cancel_unknown_job_errors(harbin_paths) -> None:
+    """``/cancel nope`` writes an unknown-job error."""
+    core, app = await _boot()
+    try:
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            await _submit(pilot, app, "/cancel nope")
+            text = _console_text(app)
+            assert "nope" in text.lower(), text
+    finally:
+        await core.shutdown()
+
+
+# ─────────────────────────── /artifacts ───────────────────────────
+
+
+async def test_artifacts_unknown_fleet_errors(harbin_paths) -> None:
+    core, app = await _boot()
+    try:
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            await _submit(pilot, app, "/artifacts nope")
+            text = _console_text(app)
+            assert "nope" in text.lower() and "unknown" in text.lower(), text
+    finally:
+        await core.shutdown()
+
+
+async def test_artifacts_lists_directory(harbin_paths, tmp_path) -> None:
+    """``/artifacts <fleet>`` lists files written under the artifact root."""
+    bare, _src = _make_local_fleet(tmp_path, "art-fleet")
+    core = await AppCore.startup()
+
+    def writer(s: str) -> None:
+        inst = HarbinApp._instance
+        if inst is not None:
+            inst._write_console(s)
+            return
+        print(s)
+
+    core.set_console_writer(writer)
+    assert core.dock_manager is not None
+    state = await core.dock_manager.register_fleet(str(bare))
+    # Pre-seed an artifact file by hand.
+    art = core.artifacts.root / state.row.name / "adhoc" / "abc"
+    art.mkdir(parents=True, exist_ok=True)
+    (art / "result.txt").write_text("hello world", encoding="utf-8")
+
+    ctx = core.make_context()
+    app = HarbinApp(ctx)
+    try:
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            await _submit(pilot, app, f"/artifacts {state.row.name}")
+            text = _console_text(app)
+            assert "adhoc" in text, text
+            await _submit(pilot, app, f"/artifacts {state.row.name} adhoc/abc")
+            text = _console_text(app)
+            assert "result.txt" in text, text
+    finally:
+        await core.shutdown()
+
+
+# ─────────────────────────── /schedule ───────────────────────────
+
+
+async def test_schedule_command_empty(harbin_paths) -> None:
+    """No fleets → ``/schedule`` writes the no-tasks message."""
+    core, app = await _boot()
+    try:
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            await _submit(pilot, app, "/schedule")
+            text = _console_text(app)
+            assert "no scheduled tasks" in text.lower(), text
+    finally:
+        await core.shutdown()
+
+
+# ─────────────────────────── /exit ───────────────────────────
+
+
+async def test_exit_calls_request_shutdown(harbin_paths) -> None:
+    """``/exit`` triggers the shutdown request (without quitting the test
+    AppCore — the request is captured at AppContext level)."""
+    core, app = await _boot()
+    called = {"n": 0}
+    original = app.ctx.request_shutdown
+
+    def fake_shutdown() -> None:
+        called["n"] += 1
+        original()
+
+    # Replace the context handle so the command sees our stub.
+    app.ctx.request_shutdown = fake_shutdown  # type: ignore[assignment]
+    try:
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            await _submit(pilot, app, "/exit")
+            assert called["n"] == 1, "request_shutdown was not invoked"
+            text = _console_text(app)
+            assert "shutting down" in text.lower(), text
+    finally:
+        await core.shutdown()
+
+
+# ────────────────────────── ctrl+L clear ─────────────────────────
+
+
+async def test_ctrl_l_clears_console(harbin_paths) -> None:
+    """ctrl+L empties the console RichLog."""
+    core, app = await _boot()
+    try:
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            await _submit(pilot, app, "/help")
+            text_before = _console_text(app)
+            assert text_before.strip(), "expected /help output before clear"
+            await pilot.press("ctrl+l")
+            await pilot.pause()
+            await pilot.pause()
+            log = app.query_one("#console", RichLog)
+            assert not log.lines, f"console not cleared, lines={[str(line) for line in log.lines]}"
+    finally:
+        await core.shutdown()
+
+
+# ────────────────────────── JobView screen ─────────────────────────
+
+
+async def test_alt_one_opens_jobview_and_escape_returns(harbin_paths, tmp_path) -> None:
+    """alt+1 opens a JobView screen for the first job; Escape closes it."""
+    from harbin.tui.screens.job_view import JobViewScreen
+
+    bare, _src = _make_local_fleet(tmp_path, "jv-fleet")
+    core = await AppCore.startup()
+
+    def writer(s: str) -> None:
+        inst = HarbinApp._instance
+        if inst is not None:
+            inst._write_console(s)
+            return
+        print(s)
+
+    core.set_console_writer(writer)
+    assert core.dock_manager is not None and core.runner is not None
+    state = await core.dock_manager.register_fleet(str(bare))
+    fake = Path(__file__).resolve().parents[1] / "fixtures" / "fake_agent_cli.py"
+    from harbin.config.models import AgentCli
+
+    core.runner.update_runtime_config(
+        agent_cli=AgentCli(command=[sys.executable, str(fake)], mode="stdin")
+    )
+    # Enqueue a job before booting the TUI so the periodic refresh assigns
+    # it to slot 1.
+    row = await core.runner.enqueue(
+        fleet=state.row, prompt="for jv", source="repl", task_label="adhoc"
+    )
+    for _ in range(150):
+        job = await core.store.get_job_by_short_id(row.short_id)
+        if job and job.status in {"success", "failed"}:
+            break
+        await asyncio.sleep(0.1)
+
+    ctx = core.make_context()
+    app = HarbinApp(ctx)
+    try:
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            # Trigger a refresh so the slot map is populated.
+            await app._refresh_periodic()
+            await pilot.pause()
+            assert 1 in app._slot_to_short_id, app._slot_to_short_id
+            await pilot.press("alt+1")
+            # Push is async.
+            for _ in range(8):
+                if any(isinstance(s, JobViewScreen) for s in app.screen_stack):
+                    break
+                await pilot.pause()
+            assert any(isinstance(s, JobViewScreen) for s in app.screen_stack), (
+                "alt+1 did not push JobViewScreen"
+            )
+            await pilot.press("escape")
+            for _ in range(8):
+                if not any(isinstance(s, JobViewScreen) for s in app.screen_stack):
+                    break
+                await pilot.pause()
+            assert not any(isinstance(s, JobViewScreen) for s in app.screen_stack)
+    finally:
+        await core.shutdown()
+
+
+# ────────────────────── status bar count updates ────────────────────
+
+
+async def test_status_bar_reflects_fleet_count(harbin_paths, tmp_path) -> None:
+    """After adding a fleet, the status bar shows '1 fleets'."""
+    from harbin.tui.widgets.status_bar import StatusBar
+
+    bare, _src = _make_local_fleet(tmp_path, "sb-fleet")
+    core = await AppCore.startup()
+
+    def writer(s: str) -> None:
+        inst = HarbinApp._instance
+        if inst is not None:
+            inst._write_console(s)
+            return
+        print(s)
+
+    core.set_console_writer(writer)
+    assert core.dock_manager is not None
+    await core.dock_manager.register_fleet(str(bare))
+    ctx = core.make_context()
+    app = HarbinApp(ctx)
+    try:
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            await app._refresh_periodic()
+            await pilot.pause()
+            sb = app.query_one(StatusBar)
+            text = str(sb.render())
+            assert "1 fleets" in text, text
+    finally:
+        await core.shutdown()
+
+
+# ─────────────────────── monitor sizing ───────────────────────
+
+
+async def test_monitor_does_not_dominate_when_empty(harbin_paths) -> None:
+    """With no jobs, the monitor takes only its empty-state rows — the
+    console pane gets the lion's share of the terminal."""
+    core, app = await _boot()
+    try:
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            monitor = app.query_one("#monitor")
+            console = app.query_one("#console", RichLog)
+            # Monitor must be smaller than console when empty (the
+            # explicit max-height: 50% on #monitor + height: auto
+            # makes this true even on short test terminals).
+            assert monitor.region.height <= console.region.height + 1, (
+                f"monitor height {monitor.region.height} should be <= "
+                f"console height {console.region.height} when empty"
+            )
+            # And monitor shouldn't be wildly tall in absolute terms either.
+            assert monitor.region.height < 20, monitor.region.height
     finally:
         await core.shutdown()
