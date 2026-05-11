@@ -1,4 +1,11 @@
-"""Overview screen — JobMonitor + Console (sub-spec 12 §2)."""
+"""Overview view — JobMonitor + Console (sub-spec 12 §2).
+
+This is the **default-screen content** of the TUI: the user sees it on
+launch and returns to it via ``alt+0`` after closing any modal/sub-
+screen. It is a plain ``Container`` (not a ``Screen``) so it composes
+directly into ``HarbinApp``'s default screen alongside the header,
+command line, and status bar.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +13,6 @@ from typing import TYPE_CHECKING
 
 from textual.app import ComposeResult
 from textual.containers import Container, VerticalScroll
-from textual.screen import Screen
 from textual.widgets import RichLog, Static
 
 from harbin.tui.widgets.job_row import JobRow, JobRowData
@@ -72,8 +78,13 @@ class JobMonitor(Container):
                 existing.update_data(d)
 
 
-class OverviewScreen(Screen):
+class OverviewView(Container):
+    """The default landing view: monitor + console panes side-stacked."""
+
     DEFAULT_CSS = ""
+
+    def __init__(self) -> None:
+        super().__init__(id="overview")
 
     def compose(self) -> ComposeResult:
         yield JobMonitor()
@@ -88,3 +99,8 @@ class OverviewScreen(Screen):
     def update_monitor(self, data: list[JobRowData]) -> None:
         monitor = self.query_one(JobMonitor)
         monitor.refresh_rows(data)
+
+
+# Back-compat alias: a few imports still reference ``OverviewScreen``.
+# Keeping the name avoids touching every test/import in this PR.
+OverviewScreen = OverviewView

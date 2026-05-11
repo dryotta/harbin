@@ -35,7 +35,12 @@ _PAGES: list[tuple[str, str]] = [
 
 
 class ConfigModalScreen(ModalScreen):
-    BINDINGS = [Binding("escape", "app.pop_screen", "cancel")]
+    BINDINGS = [
+        Binding("escape", "app.pop_screen", "cancel"),
+        # Honor the global "alt+0 = overview" rule from sub-spec 12: when
+        # the modal is up, alt+0 closes it and returns to the overview.
+        Binding("alt+0", "app.pop_screen", "overview", show=False),
+    ]
     DEFAULT_CSS = ""
 
     def __init__(self, ctx: AppContext) -> None:
@@ -57,78 +62,84 @@ class ConfigModalScreen(ModalScreen):
         for key, label in _PAGES:
             btn = Button(label, id=f"page-{key}")
             sidebar.mount(btn)
-        self._render_page()
+        # Schedule the initial render as an async task so its
+        # ``remove_children`` await completes before any pre-existing
+        # content collides with new ids.
+        self.run_worker(self._render_page(), exclusive=True)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id and event.button.id.startswith("page-"):
             self._page = event.button.id.removeprefix("page-")
-            self._render_page()
+            self.run_worker(self._render_page(), exclusive=True)
         elif event.button.id == "save":
             self._save()
         elif event.button.id == "cancel":
             self.app.pop_screen()
 
-    def _render_page(self) -> None:
+    async def _render_page(self) -> None:
         assert self._content_container is not None
-        self._content_container.remove_children()
+        # Await removal so new mounts (which reuse stable ids like
+        # ``ui-theme``) don't collide with not-yet-removed widgets from
+        # the previously-rendered page.
+        await self._content_container.remove_children()
         cfg = self._ctx.config
         if self._page == "general":
             self._content_container.mount(Label("Theme:"))
-            self._content_container.mount(Input(value=cfg.ui.theme, id="ui.theme"))
+            self._content_container.mount(Input(value=cfg.ui.theme, id="ui-theme"))
             self._content_container.mount(Label("Timezone:"))
             self._content_container.mount(Input(value=cfg.timezone, id="timezone"))
             self._content_container.mount(Label("Log verbosity:"))
-            self._content_container.mount(Input(value=cfg.ui.log_verbosity, id="ui.log_verbosity"))
+            self._content_container.mount(Input(value=cfg.ui.log_verbosity, id="ui-log-verbosity"))
         elif self._page == "fleets":
             self._render_fleets_page()
         elif self._page == "scheduler":
             self._content_container.mount(Label("Tick (seconds, 1–60):"))
             self._content_container.mount(
-                Input(value=str(cfg.scheduler.tick_seconds), id="scheduler.tick_seconds")
+                Input(value=str(cfg.scheduler.tick_seconds), id="scheduler-tick-seconds")
             )
         elif self._page == "agent":
             self._content_container.mount(Label("Agent CLI command (space-separated):"))
             self._content_container.mount(
-                Input(value=" ".join(cfg.agent_runner.agent_cli.command), id="agent.command")
+                Input(value=" ".join(cfg.agent_runner.agent_cli.command), id="agent-command")
             )
             self._content_container.mount(Label("Mode (stdin/flag/tempfile):"))
             self._content_container.mount(
-                Input(value=cfg.agent_runner.agent_cli.mode, id="agent.mode")
+                Input(value=cfg.agent_runner.agent_cli.mode, id="agent-mode")
             )
             self._content_container.mount(Label("Per-dock concurrency (1–4):"))
             self._content_container.mount(
-                Input(value=str(cfg.agent_runner.concurrency.per_dock), id="agent.per_dock")
+                Input(value=str(cfg.agent_runner.concurrency.per_dock), id="agent-per-dock")
             )
             self._content_container.mount(Label("Global cap (1–16):"))
             self._content_container.mount(
-                Input(value=str(cfg.agent_runner.concurrency.global_cap), id="agent.global_cap")
+                Input(value=str(cfg.agent_runner.concurrency.global_cap), id="agent-global-cap")
             )
             self._content_container.mount(Label("Kill grace seconds:"))
             self._content_container.mount(
-                Input(value=str(cfg.agent_runner.kill_grace_seconds), id="agent.kill_grace")
+                Input(value=str(cfg.agent_runner.kill_grace_seconds), id="agent-kill-grace")
             )
         elif self._page == "artifacts":
             self._content_container.mount(Label("Retention (e.g. 30d):"))
             self._content_container.mount(
-                Input(value=cfg.artifacts.retention, id="artifacts.retention")
+                Input(value=cfg.artifacts.retention, id="artifacts-retention")
             )
             self._content_container.mount(Label("Sweep cron:"))
             self._content_container.mount(
-                Input(value=cfg.artifacts.sweep_cron, id="artifacts.sweep_cron")
+                Input(value=cfg.artifacts.sweep_cron, id="artifacts-sweep-cron")
             )
         elif self._page == "web":
             self._content_container.mount(Label("Port:"))
-            self._content_container.mount(Input(value=str(cfg.web.port), id="web.port"))
+            self._content_container.mount(Input(value=str(cfg.web.port), id="web-port"))
             self._content_container.mount(Label("Host:"))
-            self._content_container.mount(Input(value=cfg.web.host, id="web.host"))
+            self._content_container.mount(Input(value=cfg.web.host, id="web-host"))
         elif self._page == "tunnels":
             self._content_container.mount(Label("devtunnel binary path:"))
             self._content_container.mount(
-                Input(value=cfg.tunnels.devtunnel_path, id="tunnels.path")
+                Input(value=cfg.tunnels.devtunnel_path, id="tunnels-path")
             )
             self._content_container.mount(Label("Tunnel ID (optional):"))
             self._content_container.mount(
-                Input(value=cfg.tunnels.tunnel_id or "", id="tunnels.tunnel_id")
+                Input(value=cfg.tunnels.tunnel_id or "", id="tunnels-tunnel-id")
             )
         elif self._page == "keybindings":
             self._content_container.mount(
@@ -166,7 +177,7 @@ class ConfigModalScreen(ModalScreen):
             c.mount(Static(line))
         c.mount(Label(""))
         c.mount(Label("Add fleet by git URL:"))
-        c.mount(Input(placeholder="https://github.com/you/your-fleet", id="fleet.url"))
+        c.mount(Input(placeholder="https://github.com/you/your-fleet", id="fleet-url"))
         c.mount(
             Horizontal(
                 Button("Add fleet", id="add-fleet"),
@@ -202,50 +213,50 @@ class ConfigModalScreen(ModalScreen):
         data = cfg.model_dump(mode="python")
         # General
         for wid in self.query(Input):
-            if wid.id == "ui.theme":
+            if wid.id == "ui-theme":
                 data["ui"]["theme"] = wid.value
-            elif wid.id == "ui.log_verbosity":
+            elif wid.id == "ui-log-verbosity":
                 data["ui"]["log_verbosity"] = wid.value
             elif wid.id == "timezone":
                 data["timezone"] = wid.value
-            elif wid.id == "scheduler.tick_seconds":
+            elif wid.id == "scheduler-tick-seconds":
                 try:
                     data["scheduler"]["tick_seconds"] = int(wid.value)
                 except ValueError:
                     pass
-            elif wid.id == "agent.command":
+            elif wid.id == "agent-command":
                 data["agent_runner"]["agent_cli"]["command"] = wid.value.split() or ["copilot"]
-            elif wid.id == "agent.mode":
+            elif wid.id == "agent-mode":
                 data["agent_runner"]["agent_cli"]["mode"] = wid.value
-            elif wid.id == "agent.per_dock":
+            elif wid.id == "agent-per-dock":
                 try:
                     data["agent_runner"]["concurrency"]["per_dock"] = int(wid.value)
                 except ValueError:
                     pass
-            elif wid.id == "agent.global_cap":
+            elif wid.id == "agent-global-cap":
                 try:
                     data["agent_runner"]["concurrency"]["global_cap"] = int(wid.value)
                 except ValueError:
                     pass
-            elif wid.id == "agent.kill_grace":
+            elif wid.id == "agent-kill-grace":
                 try:
                     data["agent_runner"]["kill_grace_seconds"] = int(wid.value)
                 except ValueError:
                     pass
-            elif wid.id == "artifacts.retention":
+            elif wid.id == "artifacts-retention":
                 data["artifacts"]["retention"] = wid.value
-            elif wid.id == "artifacts.sweep_cron":
+            elif wid.id == "artifacts-sweep-cron":
                 data["artifacts"]["sweep_cron"] = wid.value
-            elif wid.id == "web.port":
+            elif wid.id == "web-port":
                 try:
                     data["web"]["port"] = int(wid.value)
                 except ValueError:
                     pass
-            elif wid.id == "web.host":
+            elif wid.id == "web-host":
                 data["web"]["host"] = wid.value
-            elif wid.id == "tunnels.path":
+            elif wid.id == "tunnels-path":
                 data["tunnels"]["devtunnel_path"] = wid.value
-            elif wid.id == "tunnels.tunnel_id":
+            elif wid.id == "tunnels-tunnel-id":
                 data["tunnels"]["tunnel_id"] = wid.value or None
             elif wid.id == "keybindings":
                 kb: dict[str, str] = {}

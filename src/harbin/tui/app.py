@@ -11,7 +11,7 @@ from textual.widgets import Static
 from harbin.context import AppContext
 from harbin.repl.parser import build_registry, dispatch
 from harbin.repl.suggester import HarbinSuggester
-from harbin.tui.screens.overview import OverviewScreen
+from harbin.tui.screens.overview import OverviewView
 from harbin.tui.theme import LOGO, css_for_theme
 from harbin.tui.widgets.command_line import CommandLine
 from harbin.tui.widgets.status_bar import StatusBar
@@ -52,7 +52,7 @@ class HarbinApp(App):
 
     def compose(self) -> ComposeResult:
         yield Static(LOGO + "command center for AI agents", id="header")
-        yield OverviewScreen()
+        yield OverviewView()
         yield CommandLine(suggester=self._suggester)
         yield StatusBar()
 
@@ -84,6 +84,8 @@ class HarbinApp(App):
     # ─────────────────────── actions / keys ─────────────────────
 
     def action_focus_overview(self) -> None:
+        # When a modal or JobView is on top, pop back to the default
+        # screen (which always contains the OverviewView).
         if len(self.screen_stack) > 1:
             self.pop_screen()
 
@@ -131,12 +133,11 @@ class HarbinApp(App):
                     slot=slot,
                 )
             )
-        # find current overview screen
+        # Update the overview view (always present on the default screen).
         try:
-            for screen in self.screen_stack:
-                if isinstance(screen, OverviewScreen):
-                    screen.update_monitor(data)
-                    break
+            view = self._overview()
+            if view is not None:
+                view.update_monitor(data)
         except Exception:
             pass
         # status bar
@@ -149,6 +150,21 @@ class HarbinApp(App):
             )
         except Exception:
             pass
+
+    def _overview(self) -> OverviewView | None:
+        """Locate the persistent OverviewView on the default screen.
+
+        We query the base screen rather than ``screen_stack[-1]`` so a
+        pushed modal/JobView doesn't hide the overview from us.
+        """
+        try:
+            base = self.screen_stack[0] if self.screen_stack else self.screen
+            matches = base.query(OverviewView)
+            for w in matches:
+                return w
+        except Exception:
+            return None
+        return None
 
     def _active_label(self) -> str:
         if len(self.screen_stack) > 1:
@@ -164,9 +180,8 @@ class HarbinApp(App):
 
     def _write_console(self, text: str) -> None:
         try:
-            for screen in self.screen_stack:
-                if isinstance(screen, OverviewScreen):
-                    screen.write_console(text)
-                    break
+            view = self._overview()
+            if view is not None:
+                view.write_console(text)
         except Exception:
             pass
