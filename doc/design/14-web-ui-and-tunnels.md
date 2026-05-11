@@ -48,7 +48,7 @@ textual-serve renders the Textual app to a browser-side terminal emulator. Impli
 
 - Mouse and clipboard work via the browser; keyboard chords behave as they do in any terminal in the browser.
 - Glyph fidelity depends on the browser font; consider serving a recommended monospace via simple HTML wrapper (post-v1).
-- A single textual-serve session is **per-connection** — multiple browsers can connect and each gets an independent harbin TUI session **bound to the same backend state**. State writes coordinate through the single `AppCore` (no extra locking — the event loop is the lock).
+- Each WebSocket connection spawns a **separate** harbin subprocess (the constructor is `Server(command="harbin")`). Backend state is shared through the on-disk SQLite database (WAL mode — sub-spec 02 §1) so two browser sessions see the same fleets/jobs/schedules. They do **not** share in-memory state (live job ring buffers, scheduler tick state, tunnel handle) — a job's live stdio tail is visible only in the session whose harbin process spawned the agent. Concurrent writers to the SQLite file are safe because of `busy_timeout` + WAL.
 
 ---
 

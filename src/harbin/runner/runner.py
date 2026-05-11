@@ -53,6 +53,7 @@ class _LiveJob:
     artifact_dir: Path | None = None
     started: bool = False
     queued_at: _dt.datetime = field(default_factory=lambda: _dt.datetime.now(_dt.UTC))
+    pre_dirty: bool = False  # dock had user-local changes before the agent spawned
 
 
 JobEvent = Callable[[str, dict[str, object]], Coroutine[object, object, None] | None]
@@ -353,6 +354,19 @@ class AgentRunner:
                 }
             )
 
+            # Capture pre-job dock cleanliness so post-job push-back can
+            # refuse to sweep user-local edits into a harbin commit
+            # (sub-spec 07 §3.1 + §4 — clean tree is the precondition for
+            # push-back). The check is cheap (<5ms) and we tolerate any
+            # error by treating the tree as dirty (fail-safe).
+            try:
+                from harbin.fleet.dock import _git as _dock_git
+
+                pre = await _dock_git("status", "--porcelain", cwd=Path(fleet.dock_path), timeout=5)
+                live.pre_dirty = pre.returncode != 0 or bool(pre.stdout.strip())
+            except Exception:
+                live.pre_dirty = True
+
             stdin_setting: int = (
                 asyncio.subprocess.PIPE
                 if snap.agent_cli.mode == "stdin"
@@ -496,13 +510,18 @@ class AgentRunner:
             if status == "success":
                 state = self._dock_manager.states.get(fleet.id)
                 if state is not None and live.artifact_dir is not None:
-                    warning = await self._dock_manager.push_back(
-                        state=state,
-                        artifact_dir=live.artifact_dir,
-                        short_id=job.short_id,
-                        task_label=snap.task_label,
-                        prompt=job.prompt,
-                    )
+                    if live.pre_dirty:
+                        warning: str | None = (
+                            "push-back skipped: dock had user-local changes before the job started"
+                        )
+                    else:
+                        warning = await self._dock_manager.push_back(
+                            state=state,
+                            artifact_dir=live.artifact_dir,
+                            short_id=job.short_id,
+                            task_label=snap.task_label,
+                            prompt=job.prompt,
+                        )
                     if warning:
                         _log.warning("push-back: %s", warning)
                         await self._record_log(live, "system", warning + "\n")

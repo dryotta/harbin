@@ -185,6 +185,20 @@ WebSocket connection spawns that command. The implementation uses
 backend state across browser sessions is provided by the SQLite WAL
 mode (sub-spec 02 §1) rather than by sharing an in-memory ``AppCore``.
 
-A smoke test in ``tests/integration/test_serve_smoke.py`` spawns
-``harbin serve`` as a subprocess and confirms it binds the requested
-port.
+## 21 · Push-back safety — pre-dirty check
+
+After §19 broadened ``git add -A`` to cover the whole dock tree, the
+runner needed a guard against sweeping the operator's own uncommitted
+edits into a harbin commit. ``_spawn_and_run`` now snapshots
+``git status --porcelain`` immediately before spawning the agent. If
+that snapshot was non-empty, the post-success branch skips push-back
+and writes a warning to the job log (``push-back skipped: dock had
+user-local changes before the job started``).
+
+Regression guard: ``tests/integration/test_push_back_safety.py`` —
+modifies a tracked file in the dock before enqueueing the news sample,
+runs the agent, and asserts no commit happened locally or on the bare
+remote.
+
+If the snapshot itself fails (rare; e.g. permission error) the runner
+treats the tree as dirty — fail-safe rather than fail-open.
