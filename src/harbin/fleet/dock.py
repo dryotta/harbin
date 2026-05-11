@@ -415,29 +415,49 @@ class DockManager:
         task_label: str,
         prompt: str,
     ) -> str | None:
-        """Push artifacts that landed inside the dock. Returns warning or None."""
+        """Push agent-written changes that landed in the dock tree.
+
+        Per sub-spec 07 §4.1 (`Where do artifacts land in the repo?`):
+        "Only files written **inside the dock** are pushable." That is
+        broader than the per-job ``artifact_dir`` — agents commonly write
+        archive copies into the dock itself (e.g. the ``news`` sample's
+        ``briefs/`` directory) while the per-job ``artifact_dir`` lives in
+        ``paths.artifact_root`` outside the dock.
+
+        Algorithm:
+          1. Bail if push_back is disabled or we're off the default branch.
+          2. ``git add -A`` to stage *every* dock-tree change (including the
+             artifact dir, if it happened to land inside the dock).
+          3. If nothing was staged → no-op return.
+          4. Commit (harbin identity) + push.
+
+        Returns ``None`` on success or no-op; a one-line warning otherwise.
+        """
         if state.fleet_config is None:
             return None
         if not state.fleet_config.artifact_policy.push_back:
             return None
         dock = Path(state.row.dock_path)
-        try:
-            if not artifact_dir.resolve().is_relative_to(dock.resolve()):
-                return None
-        except OSError:
-            return None
-        rel = artifact_dir.resolve().relative_to(dock.resolve())
 
         # Pre-check: clean+on-branch (the runner could have left changes).
         head = await _git("symbolic-ref", "--short", "HEAD", cwd=dock, timeout=5)
         if head.returncode != 0 or head.stdout.strip() != state.fleet_config.default_branch:
             return "push-back skipped: not on default branch"
 
-        add = await _git("add", "--", str(rel), cwd=dock)
+        # Stage everything in the dock tree. This catches both artifact_dir
+        # writes (when the dir is inside the dock) and agent-written archive
+        # copies elsewhere in the worktree. Operating on the dock root is
+        # safe because the periodic sync loop has already guaranteed the
+        # tree was clean *before* the job ran.
+        add = await _git("add", "-A", cwd=dock)
         if add.returncode != 0:
             return f"push-back: git add failed: {add.stderr.strip()}"
         diff = await _git("diff", "--cached", "--quiet", cwd=dock)
         if diff.returncode == 0:
+            # The artifact_dir argument is kept for parity with the design
+            # doc signature and for forensic logging — it's intentionally
+            # unused below the staged-diff check.
+            del artifact_dir
             return None  # nothing staged
 
         now = _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")

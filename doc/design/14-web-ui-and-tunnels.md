@@ -23,7 +23,7 @@ harbin serve [--port PORT] [--host HOST]
 Behavior:
 
 1. Run the normal startup sequence ([`04-concurrency-and-errors`](./04-concurrency-and-errors.md) §2) **without** mounting the local Textual app.
-2. Call `textual_serve.server.Server(app_target="harbin.tui.app:HarbinApp", port=port, host=host).serve_blocking()`. This binds the socket and serves the app to any connecting client.
+2. Call `textual_serve.server.Server(command="harbin", port=port, host=host).serve()`. This binds the socket and serves the app to any connecting client. The installed `textual-serve` exposes a `command=<str>` constructor (one subprocess per WebSocket connection); the original draft of this sub-spec named an `app_target` parameter that does not exist in the public API. Shared backend state is provided by the single SQLite file via WAL.
 3. Print a single line to stderr: `harbin serving on http://<host>:<port>/`.
 4. If `--host` is `0.0.0.0` (or otherwise non-loopback), additionally print:
    ```

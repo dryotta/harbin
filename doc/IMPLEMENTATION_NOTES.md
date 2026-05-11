@@ -141,3 +141,50 @@ agent so the integration test in
 `tests/integration/test_sample_fleets.py` exercises the real
 fleet → runner → artifact path end-to-end with no network or LLM
 required.
+
+The news agent also ships an OpenAI **and** Anthropic adapter (file
+``examples/harbin-agent-sample-news/agent/run.py``). When either
+``OPENAI_API_KEY`` or ``ANTHROPIC_API_KEY`` is set the agent reaches
+out to the corresponding HTTP API (with OpenAI preferred); otherwise
+it falls back to the deterministic offline brief. The dispatcher is
+covered by `tests/unit/test_news_agent_llm.py` with mocked
+``urlopen`` so the suite remains hermetic.
+
+## 19 · Push-back covers the whole dock tree
+
+The original implementation of ``DockManager.push_back`` only
+``git add``-ed the per-job ``artifact_dir`` (and only when that
+directory happened to live inside the dock). In practice, samples
+following the design (07 §4.1) write the **archive copy** into the
+dock tree (e.g. ``briefs/``) while the canonical artifact lives
+*outside* the dock under ``paths.artifact_root``. The old logic
+therefore skipped push-back entirely for the news sample.
+
+The fix: when ``push_back: true`` and we are on ``default_branch``,
+run ``git add -A`` in the dock. If nothing was staged, the call
+remains a clean no-op. Otherwise commit with the harbin identity and
+push. Regression guards:
+
+* ``tests/integration/test_push_back_broad.py`` — explicit unit-level
+  checks that a dock-side file outside ``artifact_dir`` is staged
+  and pushed; clean dock is a no-op.
+* ``tests/integration/test_push_back_e2e.py`` — runs the news and
+  price-monitor samples through the real ``AgentRunner`` and verifies
+  the news sample's ``briefs/brief-*.md`` lands on ``origin/main``
+  while the price-monitor sample (``push_back: false``) leaves the
+  remote ref untouched.
+
+## 20 · ``textual-serve`` API
+
+The original sub-spec 14 §1 step 2 named ``Server(app_target=…)``,
+which does not exist in the public ``textual-serve`` API as of the
+version pinned in ``pyproject.toml`` (and the upstream README on
+PyPI). The constructor takes a single ``command: str``; each
+WebSocket connection spawns that command. The implementation uses
+``Server(command="harbin", host=…, port=…)`` accordingly. Shared
+backend state across browser sessions is provided by the SQLite WAL
+mode (sub-spec 02 §1) rather than by sharing an in-memory ``AppCore``.
+
+A smoke test in ``tests/integration/test_serve_smoke.py`` spawns
+``harbin serve`` as a subprocess and confirms it binds the requested
+port.
