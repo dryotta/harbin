@@ -20,6 +20,7 @@ from harbin.logging import setup as setup_logging
 from harbin.paths import HarbinPaths, ensure_all, resolve
 from harbin.runner.runner import AgentRunner
 from harbin.scheduler import Scheduler
+from harbin.web.serve_manager import WebServeManager
 from harbin.web.tunnels import TunnelManager
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -45,6 +46,7 @@ class AppCore:
         self.runner: AgentRunner | None = None
         self.scheduler: Scheduler | None = None
         self.tunnels: TunnelManager | None = None
+        self.web_server: WebServeManager | None = None
         self._console_writer = lambda s: print(s)
         self._shutdown_event = asyncio.Event()
         self._shutdown_started = False
@@ -131,8 +133,21 @@ class AppCore:
         await self.scheduler.reconcile_all()
         await self.scheduler.start()
 
-        # 6. Tunnels
+        # 6. Tunnels + web server (managed children — both expose
+        # start/stop/status via slash commands).
         self.tunnels = TunnelManager(devtunnel_path=self.config.tunnels.devtunnel_path)
+        self.web_server = WebServeManager()
+
+        # 6a. Honor config.web.autostart (sub-spec 14 §1.1).
+        if self.config.web.autostart:
+            try:
+                msg = await self.web_server.start(
+                    port=self.config.web.port,
+                    host=self.config.web.host,
+                )
+                _log.info("web autostart: %s", msg)
+            except Exception:
+                _log.warning("web autostart failed", exc_info=True)
 
         # 7. Periodic dock sync
         await self.dock_manager.start_periodic_sync()
@@ -327,6 +342,8 @@ class AppCore:
             await self.runner.stop()
         if self.dock_manager is not None:
             await self.dock_manager.stop()
+        if self.web_server is not None:
+            await self.web_server.cleanup()
         if self.tunnels is not None:
             await self.tunnels.cleanup()
         if self.store is not None:
@@ -342,6 +359,7 @@ class AppCore:
         assert self.runner is not None
         assert self.scheduler is not None
         assert self.tunnels is not None
+        assert self.web_server is not None
         return AppContext(
             config=self.config,
             paths=self.paths,
@@ -351,6 +369,7 @@ class AppCore:
             runner=self.runner,
             scheduler=self.scheduler,
             tunnels=self.tunnels,
+            web_server=self.web_server,
             console_writer=self._console_writer,
             request_shutdown=self.request_shutdown,
             apply_live_config=self.apply_live_config,

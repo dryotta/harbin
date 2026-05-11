@@ -20,6 +20,7 @@ _DESC: dict[str, str] = {
     "artifacts": "/artifacts <fleet> [path]  — browse a fleet's artifact tree",
     "sync": "/sync [fleet]            — force git fetch + ff",
     "schedule": "/schedule [fleet]        — show cron + next-fire times",
+    "web": "/web [start|stop|status]   — toggle the local web UI server",
     "tunnel": "/tunnel [start|stop|status] — manage devtunnel host",
     "config": "/config                  — open the multi-page settings screen",
     "exit": "/exit                    — confirm + quit",

@@ -535,6 +535,36 @@ async def test_status_bar_shows_overview_initially(harbin_paths) -> None:
         await core.shutdown()
 
 
+# ─────────────────────── /web ───────────────────────
+
+
+async def test_web_status_when_not_running(harbin_paths) -> None:
+    """``/web`` (no args) reports 'not running' through the in-app console."""
+    core, app = await _boot()
+    try:
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            await _submit(pilot, app, "/web")
+            text = _console_text(app)
+            assert "web: not running" in text.lower(), text
+    finally:
+        await core.shutdown()
+
+
+async def test_web_listed_in_help(harbin_paths) -> None:
+    core, app = await _boot()
+    try:
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            await _submit(pilot, app, "/help")
+            text = _console_text(app)
+            assert "/web" in text and "web UI server" in text, text
+    finally:
+        await core.shutdown()
+
+
 # ─────────────────────── /config → Fleets → Add ─────────────────────
 
 

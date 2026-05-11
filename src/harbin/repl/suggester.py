@@ -17,6 +17,7 @@ KNOWN_COMMANDS = [
     "artifacts",
     "sync",
     "schedule",
+    "web",
     "tunnel",
     "config",
     "exit",
@@ -66,10 +67,10 @@ class HarbinSuggester(Suggester):
                     if n.startswith(rest):
                         return f"/{cmd} {n}"
                 return None
-            if cmd == "tunnel":
+            if cmd in {"web", "tunnel"}:
                 rest = parts[1]
                 for sub in ("start", "stop", "status"):
                     if sub.startswith(rest):
-                        return f"/tunnel {sub}"
+                        return f"/{cmd} {sub}"
                 return None
         return None

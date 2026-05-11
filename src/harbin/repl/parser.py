@@ -27,6 +27,7 @@ def build_registry() -> dict[str, Command]:
     from harbin.repl.commands.schedule import ScheduleCommand
     from harbin.repl.commands.sync import SyncCommand
     from harbin.repl.commands.tunnel import TunnelCommand
+    from harbin.repl.commands.web import WebCommand
 
     return {
         "help": HelpCommand(),
@@ -36,6 +37,7 @@ def build_registry() -> dict[str, Command]:
         "artifacts": ArtifactsCommand(),
         "sync": SyncCommand(),
         "schedule": ScheduleCommand(),
+        "web": WebCommand(),
         "tunnel": TunnelCommand(),
         "config": ConfigCommand(),
         "exit": ExitCommand(),

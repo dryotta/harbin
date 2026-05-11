@@ -14,6 +14,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from harbin.paths import HarbinPaths
     from harbin.runner.runner import AgentRunner
     from harbin.scheduler import Scheduler
+    from harbin.web.serve_manager import WebServeManager
     from harbin.web.tunnels import TunnelManager
 
 
@@ -29,6 +30,7 @@ class AppContext:
     runner: AgentRunner
     scheduler: Scheduler
     tunnels: TunnelManager
+    web_server: WebServeManager
     console_writer: Callable[[str], None]
     request_shutdown: Callable[[], None]
     apply_live_config: Callable[[Config], None]
