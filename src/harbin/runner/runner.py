@@ -392,14 +392,16 @@ class AgentRunner:
 
             live.proc = proc
             # Cancel could have arrived between the spawn returning and now;
-            # if it did, send the termination signal immediately.
+            # if it did, send the termination signal immediately. The task is
+            # tracked via `_aux_tasks` with a discard callback so it doesn't
+            # leak when complete.
             if live.cancel_requested:
-                self._aux_tasks.add(
-                    asyncio.create_task(
-                        self._terminate(live),
-                        name=f"runner.terminate:{job.short_id}",
-                    )
+                terminate_task = asyncio.create_task(
+                    self._terminate(live),
+                    name=f"runner.terminate:{job.short_id}",
                 )
+                self._aux_tasks.add(terminate_task)
+                terminate_task.add_done_callback(self._aux_tasks.discard)
             live.log_file = (artifact_dir / "job.log").open("a", encoding="utf-8", errors="replace")
             live.started = True
             await self._record_log(
