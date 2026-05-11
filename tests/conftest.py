@@ -15,6 +15,11 @@ def harbin_home(tmp_path, monkeypatch):
     home = tmp_path / "harbin_home"
     home.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("HARBIN_HOME", str(home))
+    # Pin the sample agents to offline mode so CI never tries to shell
+    # out to the real `copilot` binary (which may or may not be on PATH
+    # on the test machine, and would make tests non-hermetic either way).
+    # Each sample agent's `_resolve_mode()` honours this env var.
+    monkeypatch.setenv("HARBIN_AGENT_MODE", "offline")
     yield home
 
 

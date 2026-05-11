@@ -52,7 +52,7 @@ async def test_flag_mode_invocation(store, harbin_paths, fake_agent_cli, local_f
     try:
         import os
 
-        os.environ["HARBIN_AGENT_MODE"] = "flag"
+        os.environ["HARBIN_FAKE_MODE"] = "flag"
         try:
             row = await runner.enqueue(
                 fleet=state.row, prompt="flag-mode hi", source="repl", task_label="adhoc"
@@ -63,7 +63,7 @@ async def test_flag_mode_invocation(store, harbin_paths, fake_agent_cli, local_f
             assert artifact.exists()
             assert "flag-mode hi" in artifact.read_text(encoding="utf-8")
         finally:
-            os.environ.pop("HARBIN_AGENT_MODE", None)
+            os.environ.pop("HARBIN_FAKE_MODE", None)
     finally:
         await runner.stop()
 
@@ -78,7 +78,7 @@ async def test_tempfile_mode_invocation(store, harbin_paths, fake_agent_cli, loc
     try:
         import os
 
-        os.environ["HARBIN_AGENT_MODE"] = "tempfile"
+        os.environ["HARBIN_FAKE_MODE"] = "tempfile"
         try:
             row = await runner.enqueue(
                 fleet=state.row,
@@ -92,7 +92,7 @@ async def test_tempfile_mode_invocation(store, harbin_paths, fake_agent_cli, loc
             assert artifact.exists()
             assert "tempfile prompt content" in artifact.read_text(encoding="utf-8")
         finally:
-            os.environ.pop("HARBIN_AGENT_MODE", None)
+            os.environ.pop("HARBIN_FAKE_MODE", None)
     finally:
         await runner.stop()
 

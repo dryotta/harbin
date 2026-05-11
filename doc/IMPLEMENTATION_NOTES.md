@@ -142,13 +142,28 @@ agent so the integration test in
 fleet → runner → artifact path end-to-end with no network or LLM
 required.
 
-The news agent also ships an OpenAI **and** Anthropic adapter (file
-``examples/harbin-agent-sample-news/agent/run.py``). When either
-``OPENAI_API_KEY`` or ``ANTHROPIC_API_KEY`` is set the agent reaches
-out to the corresponding HTTP API (with OpenAI preferred); otherwise
-it falls back to the deterministic offline brief. The dispatcher is
-covered by `tests/unit/test_news_agent_llm.py` with mocked
-``urlopen`` so the suite remains hermetic.
+Each sample exposes a `HARBIN_AGENT_MODE` env var with two values:
+
+* `offline` — deterministic synthetic output. No network, no LLM,
+  reproducible. **This is the canonical test mode**; harbin's
+  `tests/conftest.py` pins it via an autouse fixture so the suite
+  never tries to shell out to the real `copilot` binary.
+* `copilot` — shell out to the GitHub Copilot CLI (`copilot`) on
+  stdin and consume its stdout. Falls back to `offline` on any
+  failure (missing binary, non-zero exit, timeout, empty/unparseable
+  output) so the harbin job always produces a valid artifact.
+
+When `HARBIN_AGENT_MODE` is unset, the agents auto-detect: `copilot`
+when the binary is on PATH, otherwise `offline`. Additional knobs
+(`HARBIN_COPILOT_BIN`, `HARBIN_COPILOT_TIMEOUT`) are documented in
+each sample's README.
+
+The earlier direct OpenAI / Anthropic Messages API integration in
+the news sample (and the `HARBIN_PRICE_API_BASE` HTTP shortcut in
+the price-monitor sample) were removed: harbin's design intent
+(sub-spec 11) is that the **agent CLI** — typically `copilot` — IS
+the LLM integration surface. Python-side HTTP shortcuts inside the
+samples blurred that boundary.
 
 ## 19 · Push-back covers the whole dock tree
 

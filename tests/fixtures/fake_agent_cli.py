@@ -2,7 +2,10 @@
 """Test-only fake agent CLI (sub-spec 05 §3).
 
 Honors:
-  * ``HARBIN_AGENT_MODE`` (``stdin``/``flag``/``tempfile``) — default ``stdin``.
+  * ``HARBIN_FAKE_MODE`` (``stdin``/``flag``/``tempfile``) — default ``stdin``.
+    Matches the harbin ``agent_cli.mode`` invocation contract; renamed
+    from ``HARBIN_AGENT_MODE`` to avoid a collision with the sample-fleet
+    agents' offline/copilot mode switch.
   * ``HARBIN_FAKE_EXIT`` — integer exit code (default 0).
   * ``HARBIN_FAKE_DURATION`` — sleep seconds (default 0).
   * ``HARBIN_ARTIFACT_DIR`` — where to write ``result.txt``.
@@ -43,7 +46,7 @@ def _read_prompt(mode: str) -> str:
 
 
 def main() -> int:
-    mode = os.environ.get("HARBIN_AGENT_MODE", "stdin")
+    mode = os.environ.get("HARBIN_FAKE_MODE", "stdin")
     duration = float(os.environ.get("HARBIN_FAKE_DURATION", "0") or 0)
     exit_code = int(os.environ.get("HARBIN_FAKE_EXIT", "0") or 0)
 
