@@ -46,15 +46,15 @@ class JobsCommand(Command):
             ctx.console_writer("(no jobs)")
             return
         fleets = {f.id: f.name for f in await ctx.store.list_fleets()}
+        # Build a {task_pk: task_id} map once so each row resolves in O(1).
+        tasks = {t.id: t.task_id for t in await ctx.store.list_tasks()}
         ctx.console_writer(
             f"{'status':10} {'fleet':28} {'task':14} {'#id':8} {'started':22} {'elapsed':>8}"
         )
         for j in rows:
             glyph = STATUS_GLYPHS.get(j.status, "·")
             fname = fleets.get(j.fleet_id, f"#{j.fleet_id}")
-            # find task label via task_pk if any (cheap miss → 'adhoc')
-            task_label = "adhoc"
-            # We don't have a direct lookup; tasks are by id. Skip lookup for now to keep this fast.
+            task_label = tasks.get(j.task_pk, "adhoc") if j.task_pk is not None else "adhoc"
             line = (
                 f"{glyph}{j.status:<9} "
                 f"{fname[:28]:<28} "

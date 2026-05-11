@@ -187,7 +187,12 @@ class ConfigModalScreen(ModalScreen):
         target = self._ctx.paths.config_dir / "config.yaml"
         atomic_write_text(target, yaml.safe_dump(cfg.model_dump(mode="python"), sort_keys=False))
         self._ctx.console_writer("config saved")
-        # update in-memory config
+        # Propagate the apply-live subset to runner/scheduler/logging.
+        try:
+            self._ctx.apply_live_config(cfg)
+        except Exception as e:  # pragma: no cover - defensive
+            self._ctx.console_writer(f"[warn]live apply failed: {e}[/warn]")
+        # update in-memory snapshot (status bar, etc.)
         self._ctx.config.__dict__.update(cfg.__dict__)
         self.app.pop_screen()
 

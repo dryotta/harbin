@@ -33,7 +33,7 @@ async def add_sample(name: str, *, paths: HarbinPaths, store: Store) -> str:
     url = SAMPLE_FLEETS[name]
     paths.dock_root.mkdir(parents=True, exist_ok=True)
     # Use the repo basename as the preliminary path
-    prelim_name = Path(url.rstrip("/").rstrip(".git")).name
+    prelim_name = Path(url.rstrip("/").removesuffix(".git")).name
     prelim_path = paths.dock_root / prelim_name
 
     if not prelim_path.exists():
@@ -41,6 +41,7 @@ async def add_sample(name: str, *, paths: HarbinPaths, store: Store) -> str:
             "git",
             "clone",
             "--depth=50",
+            "--",
             url,
             str(prelim_path),
             stdout=asyncio.subprocess.PIPE,

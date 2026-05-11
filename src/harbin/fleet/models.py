@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from harbin.config.models import AgentCli, Retention, parse_retention
 
-FLEET_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{1,30}$")
+FLEET_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 TASK_ID_RE = re.compile(r"^[a-z][a-z0-9-]{1,40}$")
 
 FleetName = Annotated[str, Field(pattern=FLEET_NAME_RE.pattern)]

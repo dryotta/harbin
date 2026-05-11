@@ -13,7 +13,14 @@ ROOT_NAME = "harbin"
 _RING_BUFFER: collections.deque[str] = collections.deque(maxlen=2000)
 
 
-_GH_TOKEN_PATTERN = re.compile(r"gh[ps]_[A-Za-z0-9]{36,}")
+# Cover every public-facing GitHub token prefix (sub-spec 04 §6):
+#   * ``ghp_`` classic PAT
+#   * ``ghs_`` server-to-server
+#   * ``gho_`` OAuth
+#   * ``ghu_`` user-to-server
+#   * ``ghr_`` refresh
+#   * ``github_pat_*`` fine-grained PAT (different shape)
+_GH_TOKEN_PATTERN = re.compile(r"gh[psour]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{22,}")
 _BEARER_PATTERN = re.compile(r"Bearer\s+[A-Za-z0-9._\-]+")
 
 
@@ -25,7 +32,7 @@ class _RedactionFilter(logging.Filter):
             msg = record.getMessage()
         except Exception:
             return True
-        if "gh" in msg or "Bearer" in msg:
+        if "gh" in msg or "github_pat_" in msg or "Bearer" in msg:
             msg = _GH_TOKEN_PATTERN.sub("***REDACTED***", msg)
             msg = _BEARER_PATTERN.sub("Bearer ***REDACTED***", msg)
             record.msg = msg

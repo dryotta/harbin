@@ -92,6 +92,7 @@ class DockManager:
         self._watcher = FileWatcher()
         self._on_event = on_event or (lambda kind, data: None)
         self._reload_callbacks: list[Callable[[DockState, str], Awaitable[None]]] = []
+        self._remove_callbacks: list[Callable[[int, str], Awaitable[None]]] = []
         self._sync_tasks: dict[int, asyncio.Task[None]] = {}
         self._reload_tasks: set[asyncio.Task[None]] = set()
         self._stopping = False
@@ -103,6 +104,14 @@ class DockManager:
 
     def register_reload_callback(self, fn: Callable[[DockState, str], Awaitable[None]]) -> None:
         self._reload_callbacks.append(fn)
+
+    def register_remove_callback(self, fn: Callable[[int, str], Awaitable[None]]) -> None:
+        """Register a callback fired AFTER a fleet is removed.
+
+        Receives ``(fleet_id, fleet_name)``. Used by AppCore to tear down
+        runner dispatchers and artifact trees.
+        """
+        self._remove_callbacks.append(fn)
 
     # ─────────────────────── load existing docks ──────────────────────
 
@@ -125,7 +134,7 @@ class DockManager:
 
     async def register_fleet(self, url: str) -> DockState:
         """Clone, validate, register a fleet by URL."""
-        prelim_name = Path(url.rstrip("/").rstrip(".git")).name or "fleet"
+        prelim_name = Path(url.rstrip("/").removesuffix(".git")).name or "fleet"
         prelim_path = self._dock_root / prelim_name
 
         if prelim_path.exists():
@@ -133,7 +142,7 @@ class DockManager:
                 code="fleet.dock.clone_exists",
                 message=f"path already exists: {prelim_path}",
             )
-        result = await _git("clone", "--depth=50", url, str(prelim_path), timeout=600)
+        result = await _git("clone", "--depth=50", "--", url, str(prelim_path), timeout=600)
         if result.returncode != 0:
             self._rmtree_safe(prelim_path)
             raise DockError(
@@ -169,14 +178,21 @@ class DockManager:
 
         existing = await self._store.get_fleet_by_name(fleet_cfg.name)
         if existing is not None:
+            self._rmtree_safe(final_path)
             raise DockError(
                 code="fleet.dock.already_registered",
                 message=f"fleet '{fleet_cfg.name}' already registered",
             )
 
-        row = await self._store.insert_fleet(
-            name=fleet_cfg.name, url=url, dock_path=str(final_path)
-        )
+        try:
+            row = await self._store.insert_fleet(
+                name=fleet_cfg.name, url=url, dock_path=str(final_path)
+            )
+        except Exception:
+            # Race: another caller raced ahead. Clean up the on-disk dock
+            # so we don't leak an orphan directory.
+            self._rmtree_safe(final_path)
+            raise
         schedule_cfg = load_schedule(final_path / ".harbin" / "schedule.yaml")
         state = DockState(row=row, fleet_config=fleet_cfg, schedule_config=schedule_cfg)
         self._states[row.id] = state
@@ -228,8 +244,21 @@ class DockManager:
         t = self._sync_tasks.pop(fleet_id, None)
         if t is not None:
             t.cancel()
+        # Unschedule the watchdog handler for this dock.
+        harbin_dir = Path(state.row.dock_path) / ".harbin"
+        try:
+            self._watcher.unwatch(harbin_dir)
+        except Exception:
+            _log.warning("unwatch failed for %s", harbin_dir, exc_info=True)
         self._rmtree_safe(Path(state.row.dock_path))
         await self._store.delete_fleet(fleet_id)
+        # Fire registered remove callbacks (runner dispatcher cleanup,
+        # artifact tree rm — handled in AppCore).
+        for cb in self._remove_callbacks:
+            try:
+                await cb(fleet_id, state.row.name)
+            except Exception:
+                _log.exception("remove callback failed for %s", state.row.name)
         self._on_event("fleet_removed", {"fleet": state.row.name})
 
     # ─────────────────────────── watchdog ─────────────────────────────
@@ -456,8 +485,29 @@ class DockManager:
 
     @staticmethod
     def _rmtree_safe(path: Path) -> None:
+        if not path.exists():
+            return
+
+        def _onerror(func, p, exc_info) -> None:  # type: ignore[no-untyped-def]
+            # Windows git stores pack/loose objects as read-only; chmod
+            # them writable and retry once. ``func`` is the original
+            # call (os.unlink / os.rmdir / scandir).
+            import os
+            import stat
+
+            try:
+                os.chmod(p, stat.S_IWRITE)
+            except OSError:
+                pass
+            try:
+                func(p)
+            except OSError as e:
+                _log.warning("rmtree onerror could not remove %s: %s", p, e)
+
         try:
-            if path.exists():
-                shutil.rmtree(path, ignore_errors=False)
+            # Python 3.12+ exposes onexc; older code used onerror.
+            shutil.rmtree(path, onexc=_onerror)
+        except TypeError:  # pragma: no cover - older shutil
+            shutil.rmtree(path, onerror=_onerror)
         except OSError as e:
             _log.warning("could not rmtree %s: %s", path, e)

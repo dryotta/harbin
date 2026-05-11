@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as _dt
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +17,18 @@ if TYPE_CHECKING:  # pragma: no cover
     from harbin.db.store import FleetRow, Store
 
 _log = get_logger("artifacts")
+
+# Defensive sanity check: never produce paths with a separator or `..` in any
+# of the path components — even if a hand-edited DB sneaks past pydantic.
+_SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9._-][A-Za-z0-9._\- ]*$")
+
+
+def _safe_component(name: str, *, what: str) -> str:
+    if not name or "/" in name or "\\" in name or ".." in name or name in {".", ".."}:
+        raise ValueError(f"unsafe {what} component: {name!r}")
+    if not _SAFE_COMPONENT.match(name):
+        raise ValueError(f"unsafe {what} component: {name!r}")
+    return name
 
 
 @dataclass(frozen=True)
@@ -48,7 +61,14 @@ class ArtifactManager:
         return self._root
 
     def location_for(self, *, fleet_name: str, task_label: str, short_id: str) -> Path:
-        return self._root / fleet_name / task_label / short_id
+        # Defensive: every component must be safe even when the input
+        # bypasses pydantic (e.g. a hand-edited DB row).
+        return (
+            self._root
+            / _safe_component(fleet_name, what="fleet_name")
+            / _safe_component(task_label, what="task_label")
+            / _safe_component(short_id, what="short_id")
+        )
 
     async def prepare(
         self,
@@ -104,12 +124,29 @@ class ArtifactManager:
         return archived
 
     def _rmtree_safe(self, path: Path) -> None:
+        if not path.exists():
+            return
+
+        def _onerror(func, p, exc_info) -> None:  # type: ignore[no-untyped-def]
+            import os
+            import stat
+
+            try:
+                os.chmod(p, stat.S_IWRITE)
+            except OSError:
+                pass
+            try:
+                func(p)
+            except OSError as e:  # pragma: no cover - rare on POSIX
+                _log.warning("rmtree onerror could not remove %s: %s", p, e)
+
         try:
-            if path.exists():
-                shutil.rmtree(path, ignore_errors=False)
+            shutil.rmtree(path, onexc=_onerror)
+        except TypeError:  # pragma: no cover - older shutil
+            shutil.rmtree(path, onerror=_onerror)
         except FileNotFoundError:
             _log.info("artifact dir already gone: %s", path)
-        except PermissionError as e:
+        except PermissionError as e:  # pragma: no cover
             _log.warning("could not remove %s: %s", path, e)
         except OSError as e:
             _log.warning("rmtree failed on %s: %s", path, e)
@@ -121,3 +158,12 @@ class ArtifactManager:
             return artifact_dir.resolve().is_relative_to(dock.resolve())
         except OSError:
             return False
+
+    def remove_fleet_tree(self, fleet_name: str) -> None:
+        """Remove the entire artifact tree for a deleted fleet."""
+        try:
+            safe = _safe_component(fleet_name, what="fleet_name")
+        except ValueError:
+            _log.warning("refusing to remove unsafe fleet tree: %r", fleet_name)
+            return
+        self._rmtree_safe(self._root / safe)

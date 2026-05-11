@@ -31,3 +31,4 @@ class AppContext:
     tunnels: TunnelManager
     console_writer: Callable[[str], None]
     request_shutdown: Callable[[], None]
+    apply_live_config: Callable[[Config], None]

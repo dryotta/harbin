@@ -100,10 +100,17 @@ class AgentRunner:
 
         self._queues: dict[int, asyncio.Queue[tuple[int, str]]] = {}
         self._dispatchers: dict[int, asyncio.Task[None]] = {}
-        self._global_sem = asyncio.Semaphore(concurrency.global_cap)
+        # Custom global-cap gate: a counter + condition so we can resize
+        # safely from update_runtime_config without exceeding the cap
+        # (sub-spec 03 §5.3 + sub-spec 10 §3).
+        self._inflight: int = 0
+        self._cap_cond = asyncio.Condition()
+        self._global_cap = concurrency.global_cap
         self._dock_locks: dict[int, asyncio.Lock] = {}
         self._live: dict[int, _LiveJob] = {}
         self._stopping = False
+        # Background tasks we want to track for cleanup (e.g. cancel-stash).
+        self._aux_tasks: set[asyncio.Task[object]] = set()
 
     # ─────────────────────── public API ───────────────────────
 
@@ -114,18 +121,43 @@ class AgentRunner:
         concurrency: Concurrency | None = None,
         kill_grace_seconds: int | None = None,
     ) -> None:
-        """Apply-live config changes for **new** jobs (sub-spec 03 §5.3)."""
+        """Apply-live config changes for **new** jobs (sub-spec 03 §5.3).
+
+        Concurrency cap is enforced via the inflight-counter + condition,
+        so resizing here is safe — new acquisitions wait until ``inflight``
+        falls below the new cap; existing in-flight jobs are not pre-empted.
+        """
         if agent_cli is not None:
             self._global_agent_cli = agent_cli
         if concurrency is not None:
-            # Resize the global semaphore by replacing it. In-flight jobs hold
-            # the old one; new acquisitions go to the new one. Acceptable
-            # transient over/undershoot.
-            if concurrency.global_cap != self._concurrency.global_cap:
-                self._global_sem = asyncio.Semaphore(concurrency.global_cap)
+            self._global_cap = concurrency.global_cap
             self._concurrency = concurrency
+            # Wake any waiters; raising the cap may unblock new acquisitions.
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            if loop is not None:
+                notify_task = loop.create_task(self._notify_cap_change(), name="runner.cap-notify")
+                self._aux_tasks.add(notify_task)
+                notify_task.add_done_callback(self._aux_tasks.discard)
         if kill_grace_seconds is not None:
             self._kill_grace = kill_grace_seconds
+
+    async def _notify_cap_change(self) -> None:
+        async with self._cap_cond:
+            self._cap_cond.notify_all()
+
+    async def _acquire_global(self) -> None:
+        async with self._cap_cond:
+            while self._inflight >= self._global_cap:
+                await self._cap_cond.wait()
+            self._inflight += 1
+
+    async def _release_global(self) -> None:
+        async with self._cap_cond:
+            self._inflight = max(0, self._inflight - 1)
+            self._cap_cond.notify_all()
 
     def live_jobs(self) -> list[int]:
         return list(self._live)
@@ -256,7 +288,7 @@ class AgentRunner:
             return
 
         snap = await self._resolve_snapshot(fleet_id, task_label)
-        await self._global_sem.acquire()
+        await self._acquire_global()
         lock = self._lock_for(fleet_id) if snap.concurrency == "serial" else None
         try:
             if lock is not None:
@@ -267,7 +299,7 @@ class AgentRunner:
                 if lock is not None:
                     lock.release()
         finally:
-            self._global_sem.release()
+            await self._release_global()
 
     async def _spawn_and_run(self, fleet: FleetRow, job: JobRow, snap: _Snapshot) -> None:
         await self._store.set_job_status(job.id, "starting")
@@ -286,6 +318,9 @@ class AgentRunner:
                 short_id=job.short_id,
             )
             live.artifact_dir = artifact_dir
+            if live.cancel_requested:
+                await self._mark_cancelled_pre_spawn(live, "cancelled before spawn")
+                return
 
             try:
                 inv = build_invocation(
@@ -299,6 +334,12 @@ class AgentRunner:
                 await self._record_log(live, "system", f"invocation error: {e.message}\n")
                 await self._store.set_job_status(job.id, "failed", ended=True)
                 await self._emit_job_ended(live, "failed", None)
+                return
+
+            if live.cancel_requested:
+                if inv.cleanup_path and inv.cleanup_path.exists():
+                    inv.cleanup_path.unlink(missing_ok=True)
+                await self._mark_cancelled_pre_spawn(live, "cancelled before spawn")
                 return
 
             env = os.environ.copy()
@@ -350,6 +391,15 @@ class AgentRunner:
                 return
 
             live.proc = proc
+            # Cancel could have arrived between the spawn returning and now;
+            # if it did, send the termination signal immediately.
+            if live.cancel_requested:
+                self._aux_tasks.add(
+                    asyncio.create_task(
+                        self._terminate(live),
+                        name=f"runner.terminate:{job.short_id}",
+                    )
+                )
             live.log_file = (artifact_dir / "job.log").open("a", encoding="utf-8", errors="replace")
             live.started = True
             await self._record_log(
@@ -379,21 +429,43 @@ class AgentRunner:
                 asyncio.create_task(self._reader(live, proc.stderr, "stderr")),
             ]
 
+            rc: int | None = None
             try:
                 rc = await proc.wait()
             except asyncio.CancelledError:
+                # Loop is shutting us down. Kill the child + clean up.
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                rc = -1
+                raise
+            except Exception:
+                # Unexpected wait failure — make sure we don't leak the proc.
+                try:
+                    proc.kill()
+                    await proc.wait()
+                except Exception:
+                    pass
                 rc = -1
                 raise
             finally:
+                # Cancel + drain reader/stdin tasks so we never block on a
+                # wedged pipe.
+                for t in reader_tasks:
+                    if not t.done():
+                        t.cancel()
                 for t in reader_tasks:
                     try:
                         await t
-                    except Exception:
+                    except asyncio.CancelledError, Exception:
                         pass
                 if stdin_task is not None:
+                    if not stdin_task.done():
+                        stdin_task.cancel()
                     try:
                         await stdin_task
-                    except Exception:
+                    except asyncio.CancelledError, Exception:
                         pass
                 if inv.cleanup_path and inv.cleanup_path.exists():
                     inv.cleanup_path.unlink(missing_ok=True)
@@ -435,7 +507,14 @@ class AgentRunner:
 
             await self._artifacts.finalize(job.id)
         finally:
+            self._store.release_log_lock(job.id)
             self._live.pop(job.id, None)
+
+    async def _mark_cancelled_pre_spawn(self, live: _LiveJob, msg: str) -> None:
+        """Helper for cancelling before subprocess is alive (B2 race)."""
+        await self._record_log(live, "system", msg + "\n")
+        await self._store.set_job_status(live.job_id, "cancelled", ended=True)
+        await self._emit_job_ended(live, "cancelled", None)
 
     async def _write_stdin(self, proc: asyncio.subprocess.Process, text: str) -> None:
         if proc.stdin is None:
@@ -465,12 +544,14 @@ class AgentRunner:
         while True:
             try:
                 chunk = await stream.read(_MAX_LINE_BYTES)
+            except asyncio.CancelledError:
+                raise
             except Exception:
                 break
             if not chunk:
                 # Final flush of any leftover buffer as a line
                 if buffer:
-                    pending.append((kind, buffer.decode("utf-8", errors="replace")))
+                    pending.append((kind, _strip_cr(buffer.decode("utf-8", errors="replace"))))
                     buffer.clear()
                 if pending:
                     await self._flush(live, pending)
@@ -482,14 +563,19 @@ class AgentRunner:
                 if idx < 0:
                     if len(buffer) >= _MAX_LINE_BYTES:
                         pending.append(
-                            (kind, buffer[:_MAX_LINE_BYTES].decode("utf-8", errors="replace"))
+                            (
+                                kind,
+                                _strip_cr(
+                                    buffer[:_MAX_LINE_BYTES].decode("utf-8", errors="replace")
+                                ),
+                            )
                         )
                         del buffer[:_MAX_LINE_BYTES]
                         continue
                     break
                 line = buffer[: idx + 1].decode("utf-8", errors="replace")
                 del buffer[: idx + 1]
-                pending.append((kind, line))
+                pending.append((kind, _strip_cr(line)))
             now = asyncio.get_event_loop().time()
             if len(pending) >= _FLUSH_BATCH or (now - last_flush) >= _FLUSH_INTERVAL:
                 if pending:
@@ -533,23 +619,11 @@ class AgentRunner:
         proc = live.proc
         if proc is None or proc.returncode is not None:
             return
-        # Pre-flight stash inside the dock for forensic preservation
+        # Pre-flight stash inside the dock for forensic preservation.
+        # Run as a fire-and-forget task so /cancel never blocks on git I/O.
         state = self._dock_manager.states.get(live.fleet_id)
         if state is not None:
-            try:
-                from harbin.fleet.dock import _git as _git_call
-
-                await _git_call(
-                    "stash",
-                    "push",
-                    "-u",
-                    "-m",
-                    f"harbin cancel {live.short_id}",
-                    cwd=Path(state.row.dock_path),
-                    timeout=10,
-                )
-            except Exception:
-                _log.debug("pre-cancel stash failed; ignoring", exc_info=True)
+            self._spawn_stash_task(live.short_id, Path(state.row.dock_path))
         try:
             if sys.platform == "win32":
                 proc.send_signal(signal.CTRL_BREAK_EVENT)
@@ -575,6 +649,29 @@ class AgentRunner:
             except Exception:
                 _log.warning("SIGKILL failed for %s", live.short_id, exc_info=True)
 
+    def _spawn_stash_task(self, short_id: str, dock_path: Path) -> None:
+        """Fire-and-forget pre-cancel ``git stash``. Errors are swallowed."""
+
+        async def _stash() -> None:
+            try:
+                from harbin.fleet.dock import _git as _git_call
+
+                await _git_call(
+                    "stash",
+                    "push",
+                    "-u",
+                    "-m",
+                    f"harbin cancel {short_id}",
+                    cwd=dock_path,
+                    timeout=10,
+                )
+            except Exception:
+                _log.debug("pre-cancel stash failed; ignoring", exc_info=True)
+
+        task = asyncio.create_task(_stash(), name=f"runner.stash:{short_id}")
+        self._aux_tasks.add(task)
+        task.add_done_callback(self._aux_tasks.discard)
+
     # ─────────────────────────── shutdown ──────────────────────────────
 
     async def stop(self) -> None:
@@ -588,6 +685,22 @@ class AgentRunner:
                 await c
             except Exception:
                 pass
+        # Mark any still-queued jobs as cancelled so they don't appear as
+        # phantoms after restart.
+        for q in self._queues.values():
+            while not q.empty():
+                try:
+                    job_id, _label = q.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                try:
+                    job = await self._store.get_job(job_id)
+                    if job is not None and job.status == "queued":
+                        await self._store.set_job_status(job_id, "cancelled", ended=True)
+                except Exception:
+                    _log.exception("could not flush queued job %d", job_id)
+                finally:
+                    q.task_done()
         for task in list(self._dispatchers.values()):
             task.cancel()
         for task in list(self._dispatchers.values()):
@@ -596,6 +709,25 @@ class AgentRunner:
             except asyncio.CancelledError, Exception:
                 pass
         self._dispatchers.clear()
+        # Drain any background helpers (stash tasks, etc.) — bounded by
+        # their own internal timeouts.
+        for t in list(self._aux_tasks):
+            try:
+                await asyncio.wait_for(t, timeout=15)
+            except asyncio.CancelledError, Exception, TimeoutError:
+                pass
+        self._aux_tasks.clear()
+
+    def remove_fleet(self, fleet_id: int) -> None:
+        """Tear down the per-fleet dispatcher when a fleet is removed.
+
+        Caller is responsible for ensuring no live job remains on this dock.
+        """
+        task = self._dispatchers.pop(fleet_id, None)
+        if task is not None:
+            task.cancel()
+        self._queues.pop(fleet_id, None)
+        self._dock_locks.pop(fleet_id, None)
 
     # ─────────────────────────── helpers ───────────────────────────────
 
@@ -621,3 +753,17 @@ class AgentRunner:
 
 def _iso_now() -> str:
     return _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _strip_cr(line: str) -> str:
+    """Strip a single trailing ``\\r`` left over from a CRLF subprocess line.
+
+    Avoids stripping a *mid-line* `\\r` (which is legitimate progress output)
+    by only normalising the byte that immediately precedes the final newline
+    or that terminates a forcibly-flushed >MAX_LINE chunk.
+    """
+    if line.endswith("\r\n"):
+        return line[:-2] + "\n"
+    if line.endswith("\r"):
+        return line[:-1]
+    return line

@@ -6,6 +6,7 @@ Typed dataclass rows; no ORM.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as _dt
 import secrets
 from collections.abc import Iterable, Sequence
@@ -83,6 +84,10 @@ class Store:
 
     def __init__(self, conn: aiosqlite.Connection) -> None:
         self._conn = conn
+        # Per-job locks for append_log_chunks: serialize the
+        # SELECT MAX(seq) + INSERT … against concurrent writers from the
+        # same job (stdout, stderr, and system records overlap).
+        self._log_locks: dict[int, asyncio.Lock] = {}
 
     @classmethod
     async def open(cls, path: Path) -> Store:
@@ -350,25 +355,44 @@ class Store:
 
     # ──────────────────────── log chunks ──────────────────
 
+    def _log_lock(self, job_id: int) -> asyncio.Lock:
+        lock = self._log_locks.get(job_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._log_locks[job_id] = lock
+        return lock
+
     async def append_log_chunks(self, job_id: int, items: Iterable[tuple[str, str]]) -> None:
-        """``items`` is iterable of ``(stream, text)`` tuples."""
+        """``items`` is iterable of ``(stream, text)`` tuples.
+
+        Serialized per-job via :meth:`_log_lock` to avoid TOCTOU on
+        ``MAX(seq)`` when multiple appenders (stdout reader, stderr reader,
+        and system records) run concurrently for the same job.
+        """
         items = list(items)
         if not items:
             return
-        async with self._conn.execute(
-            "SELECT COALESCE(MAX(seq),-1) FROM job_log_chunks WHERE job_id=?",
-            (job_id,),
-        ) as cur:
-            r = await cur.fetchone()
-            next_seq = int(r[0]) + 1 if r and r[0] is not None else 0
-        now = _iso_utc()
-        rows = [(job_id, next_seq + i, now, stream, text) for i, (stream, text) in enumerate(items)]
-        await self._conn.executemany(
-            "INSERT INTO job_log_chunks(job_id,seq,ts,stream,text) VALUES(?,?,?,?,?)",
-            rows,
-        )
-        await self._enforce_cap(job_id)
-        await self._conn.commit()
+        async with self._log_lock(job_id):
+            async with self._conn.execute(
+                "SELECT COALESCE(MAX(seq),-1) FROM job_log_chunks WHERE job_id=?",
+                (job_id,),
+            ) as cur:
+                r = await cur.fetchone()
+                next_seq = int(r[0]) + 1 if r and r[0] is not None else 0
+            now = _iso_utc()
+            rows = [
+                (job_id, next_seq + i, now, stream, text) for i, (stream, text) in enumerate(items)
+            ]
+            await self._conn.executemany(
+                "INSERT INTO job_log_chunks(job_id,seq,ts,stream,text) VALUES(?,?,?,?,?)",
+                rows,
+            )
+            await self._enforce_cap(job_id)
+            await self._conn.commit()
+
+    def release_log_lock(self, job_id: int) -> None:
+        """Drop the per-job log lock after a job ends to bound memory."""
+        self._log_locks.pop(job_id, None)
 
     async def _enforce_cap(self, job_id: int) -> None:
         async with self._conn.execute(
@@ -424,6 +448,25 @@ class Store:
         ordered = list(rows)
         ordered.reverse()
         return [LogChunk(seq=r[0], ts=r[1], stream=r[2], text=r[3]) for r in ordered]
+
+    async def reap_orphan_running(self) -> int:
+        """Mark any 'queued'/'starting'/'running' rows as 'failed' at startup.
+
+        These rows exist because harbin crashed or was killed before the
+        runner could finalize them (sub-spec 02 §4 — log-chunk ring startup
+        sweep). Returns the number of rows reaped.
+        """
+        await self._conn.execute(
+            "UPDATE jobs SET status='failed', exit_code=COALESCE(exit_code, -1), "
+            "ended_at=COALESCE(ended_at, ?) "
+            "WHERE status IN ('queued','starting','running')",
+            (_iso_utc(),),
+        )
+        async with self._conn.execute("SELECT changes()") as cur:
+            r = await cur.fetchone()
+            n = int(r[0]) if r and r[0] is not None else 0
+        await self._conn.commit()
+        return n
 
     # ───────────────────────── vacuum ─────────────────────
 

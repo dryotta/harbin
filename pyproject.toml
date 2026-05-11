@@ -60,7 +60,7 @@ include = ["src/harbin", "README.md", "LICENSE", "doc"]
 [tool.ruff]
 line-length = 100
 target-version = "py314"
-extend-exclude = ["scripts", "tests/fixtures"]
+extend-exclude = ["scripts", "tests/fixtures", "examples"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "ASYNC", "RUF"]
@@ -74,7 +74,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["B011", "B017", "F841", "RUF059", "E501"]
+"tests/**" = ["B011", "B017", "F841", "RUF059", "E501", "ASYNC221", "ASYNC230"]
 
 [tool.mypy]
 python_version = "3.14"

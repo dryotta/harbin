@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from harbin.config.loader import load_config
 from harbin.config.models import Config
+from harbin.config.watch import FileWatcher, WatchEvent
 from harbin.context import AppContext
 from harbin.db.store import Store
 from harbin.fleet.artifacts import ArtifactManager
@@ -48,6 +49,8 @@ class AppCore:
         self._shutdown_event = asyncio.Event()
         self._shutdown_started = False
         self._sweep_task: asyncio.Task[None] | None = None
+        self._config_watcher: FileWatcher | None = None
+        self._config_reload_tasks: set[asyncio.Task[None]] = set()
 
     def set_console_writer(self, fn) -> None:  # type: ignore[no-untyped-def]
         self._console_writer = fn
@@ -70,6 +73,11 @@ class AppCore:
     async def _bring_up(self) -> None:
         # 1. DB
         self.store = await Store.open(self.paths.db_path)
+        # Reap any 'queued'/'starting'/'running' rows left by a previous
+        # crash so the TUI doesn't show phantom jobs.
+        reaped = await self.store.reap_orphan_running()
+        if reaped:
+            _log.info("reaped %d orphan running jobs from a prior crash", reaped)
 
         # 2. Artifact root
         artifact_root = (
@@ -102,6 +110,16 @@ class AppCore:
             on_event=lambda kind, data: None,
         )
 
+        # 4a. Wire fleet-removal cleanup: runner dispatcher + artifact tree.
+        artifacts_ref = self.artifacts
+        runner_ref = self.runner
+
+        async def _on_remove(fleet_id: int, fleet_name: str) -> None:
+            runner_ref.remove_fleet(fleet_id)
+            artifacts_ref.remove_fleet_tree(fleet_name)
+
+        self.dock_manager.register_remove_callback(_on_remove)
+
         # 5. Scheduler
         self.scheduler = Scheduler(
             store=self.store,
@@ -131,9 +149,82 @@ class AppCore:
         # 10. Signal handlers
         self._install_signals()
 
+        # 11. config.yaml hot reload (sub-spec 03 §5).
+        self._install_config_watch()
+
         n_fleets = len(self.dock_manager.states)
         n_tasks = len(await self.store.list_tasks())
         _log.info("harbin ready · %d fleets · %d tasks", n_fleets, n_tasks)
+
+    # ─────────────────────── config hot reload ───────────────────────
+
+    def _install_config_watch(self) -> None:
+        """Watch ``config.yaml`` and propagate apply-live fields on change."""
+        try:
+            self._config_watcher = FileWatcher()
+            self._config_watcher.watch(
+                self.paths.config_dir,
+                {"config.yaml"},
+                self._on_config_event,
+            )
+        except Exception:
+            _log.warning("could not install config.yaml watcher", exc_info=True)
+
+    def _on_config_event(self, evt: WatchEvent) -> None:
+        """Watcher callback (already runs on the loop after debounce)."""
+        task = asyncio.create_task(self._reload_config(evt), name="config.reload")
+        # Keep a reference until done so the task isn't GC'd early.
+        self._config_reload_tasks.add(task)
+        task.add_done_callback(self._config_reload_tasks.discard)
+
+    async def _reload_config(self, evt: WatchEvent) -> None:
+        if evt.kind == "deleted":
+            _log.warning("config.yaml deleted; keeping in-memory config")
+            return
+        try:
+            new_cfg = load_config(evt.path)
+        except Exception:
+            _log.exception("config.yaml reload failed")
+            return
+        self.apply_live_config(new_cfg)
+
+    def apply_live_config(self, new_cfg: Config) -> None:
+        """Apply the subset of config that updates at runtime without a restart.
+
+        Apply-live (sub-spec 03 §5.3):
+            * ``ui.log_verbosity`` → :func:`logging.set_level`
+            * ``timezone``, ``scheduler.tick_seconds`` → scheduler
+            * ``agent_runner.{agent_cli, concurrency, kill_grace_seconds}`` →
+              runner.update_runtime_config
+
+        Restart-required fields (theme, web bind, artifact root, etc.) are
+        copied into the in-memory ``Config`` so the values displayed by the
+        Config modal stay consistent, but they take effect on next launch.
+        """
+        from harbin.logging import set_level
+
+        try:
+            set_level(new_cfg.ui.log_verbosity)
+        except Exception:
+            _log.warning("set_level failed", exc_info=True)
+        if self.scheduler is not None:
+            try:
+                self.scheduler.update_tick(new_cfg.scheduler.tick_seconds)
+                self.scheduler.update_timezone(new_cfg.timezone)
+            except Exception:
+                _log.warning("scheduler live update failed", exc_info=True)
+        if self.runner is not None:
+            try:
+                self.runner.update_runtime_config(
+                    agent_cli=new_cfg.agent_runner.agent_cli,
+                    concurrency=new_cfg.agent_runner.concurrency,
+                    kill_grace_seconds=new_cfg.agent_runner.kill_grace_seconds,
+                )
+            except Exception:
+                _log.warning("runner live update failed", exc_info=True)
+        # Replace the in-memory snapshot (used by the modal + status bar).
+        self.config = new_cfg
+        _log.info("config: apply-live propagated")
 
     # ─────────────────────── sweep loop ──────────────────────────
 
@@ -171,7 +262,10 @@ class AppCore:
     # ─────────────────────── signals ────────────────────────────
 
     def _install_signals(self) -> None:
-        loop = asyncio.get_event_loop()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:  # pragma: no cover - only inside async context
+            return
         if sys.platform != "win32":
             for sig in (signal.SIGINT, signal.SIGTERM):
                 try:
@@ -183,10 +277,14 @@ class AppCore:
             def _handler(signum: int, frame: object) -> None:
                 loop.call_soon_threadsafe(self.request_shutdown)
 
-            try:
-                signal.signal(signal.SIGINT, _handler)
-            except OSError, ValueError:
-                pass
+            for sig_name in ("SIGINT", "SIGBREAK"):
+                sig = getattr(signal, sig_name, None)
+                if sig is None:
+                    continue
+                try:
+                    signal.signal(sig, _handler)
+                except OSError, ValueError:
+                    pass
 
     # ─────────────────────── shutdown ───────────────────────────
 
@@ -211,6 +309,12 @@ class AppCore:
             os._exit(2)
 
     async def _shutdown_inner(self) -> None:
+        if self._config_watcher is not None:
+            try:
+                self._config_watcher.stop()
+            except Exception:
+                _log.warning("config watcher stop failed", exc_info=True)
+            self._config_watcher = None
         if self.scheduler is not None:
             await self.scheduler.stop()
         if self._sweep_task is not None:
@@ -249,4 +353,5 @@ class AppCore:
             tunnels=self.tunnels,
             console_writer=self._console_writer,
             request_shutdown=self.request_shutdown,
+            apply_live_config=self.apply_live_config,
         )
